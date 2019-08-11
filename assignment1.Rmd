@@ -1,0 +1,462 @@
+---
+title: "MAST30034 Assignment 1"
+author: "Xuanken Tay"
+date: "August 6, 2019"
+output: 
+  html_document:
+    number_sections: true
+    toc: true
+    fig_width: 7
+    fig_height: 4.5
+    theme: readable
+    highlights: tango
+    code_folding: hide
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+# Introduction
+
+This is an introduction. **Bold**. *Italic*, `command`
+
+## New York City Taxi & Limousine Commission (TLC) Service Trip Record Data
+
+## TLC Taxi Zone Data
+
+- [Taxi Zone Lookup Table](https://s3.amazonaws.com/nyc-tlc/misc/taxi+_zone_lookup.csv): a lookup table that contains TLC taxi zone location IDs, location names and corresponding boroughs for each ID is used to convert ...  
+
+- [Taxi Zone Shapefile](https://s3.amazonaws.com/nyc-tlc/misc/taxi_zones.zip): a shapefile containing the boundaries for the taxi zones for use in geospatial visualisation.  
+
+## New York Central Park Weather Data
+
+Central Park weather data comes from [National Climatic Data Center](https://www.ncdc.noaa.gov/). Contains daily weather observation. Columns are [average daily wind speed(m/s, mile/hr), precipitation(inch), snowfall (inch), snow depth (inch), maximum temperature (celsius), minimum temperature (celsius)]
+
+
+## Another external data
+
+
+## Load libraries and helper functionsz
+
+Put all libraries and descrpitions here
+
+```{r libraries, message=FALSE}
+library(tidyverse)
+library(data.table)
+library(ggmap)
+library(tmap)
+library(rgdal)
+library(lubridate)
+library(spatialEco)
+```
+
+Functions 
+
+```{r helper_funcs}
+read_taxi_data <- function(months, cols) {
+  dfs <- list()
+  for (i in sprintf("%02d", months)) {
+    fname <- paste0("data/green_tripdata_2015-", i, ".csv.gz")
+    dfs[[i]] <- fread(fname, fill=TRUE, select=cols, showProgress=FALSE)
+  }
+  rbindlist(dfs)
+}
+
+restart_r <- function() {
+  rm(list=ls())
+  .rs.restartR()
+}
+
+m <- function() pryr::mem_used()
+
+```
+
+*multiplot* function, courtesy of [R Cookbooks](http://www.cookbook-r.com/Graphs/Multiple_graphs_on_one_page_(ggplot2)/) to create multi-panel plots.
+
+```{r multiplot}
+# Multiple plot function
+#
+# ggplot objects can be passed in ..., or to plotlist (as a list of ggplot objects)
+# - cols:   Number of columns in layout
+# - layout: A matrix specifying the layout. If present, 'cols' is ignored.
+#
+# If the layout is something like matrix(c(1,2,3,3), nrow=2, byrow=TRUE),
+# then plot 1 will go in the upper left, 2 will go in the upper right, and
+# 3 will go all the way across the bottom.
+#
+multiplot <- function(..., plotlist=NULL, file, cols=1, layout=NULL) {
+  library(grid)
+
+  # Make a list from the ... arguments and plotlist
+  plots <- c(list(...), plotlist)
+
+  numPlots = length(plots)
+
+  # If layout is NULL, then use 'cols' to determine layout
+  if (is.null(layout)) {
+    # Make the panel
+    # ncol: Number of columns of plots
+    # nrow: Number of rows needed, calculated from # of cols
+    layout <- matrix(seq(1, cols * ceiling(numPlots/cols)),
+                    ncol = cols, nrow = ceiling(numPlots/cols))
+  }
+
+ if (numPlots==1) {
+    print(plots[[1]])
+
+  } else {
+    # Set up the page
+    grid.newpage()
+    pushViewport(viewport(layout = grid.layout(nrow(layout), ncol(layout))))
+
+    # Make each plot, in the correct location
+    for (i in 1:numPlots) {
+      # Get the i,j matrix positions of the regions that contain this subplot
+      matchidx <- as.data.frame(which(layout == i, arr.ind = TRUE))
+
+      print(plots[[i]], vp = viewport(layout.pos.row = matchidx$row,
+                                      layout.pos.col = matchidx$col))
+    }
+  }
+}
+```
+
+----------------------------------------------------------------------------------------------------------
+
+# Data Selection
+
+Green taxi data has been chosen for this analysis. Because ... and less space on disk.
+
+## Period Selection
+
+I selected data from month.... because ... (summer and winter)
+```{r}
+year <- 2015
+# summer_months <- c(6, 7, 8)
+# winter_months <- c(12, 1, 2)
+
+summer_months <- c(7)
+winter_months <- c(1)
+```
+
+## Attribute Selection
+
+Attributes ... have been chosen for analysis.
+
+```{r}
+cols_selected <- c("lpep_pickup_datetime", "Lpep_dropoff_datetime",
+                   "Trip_distance", "Tip_amount", "Total_amount",
+                   "Passenger_count", "Payment_type", 
+                   "Pickup_latitude", "Pickup_longitude",
+                   "Dropoff_latitude", "Dropoff_longitude")
+```
+
+
+----------------------------------------------------------------------------------------------------------
+
+# Data Preparation
+
+The NYC taxi trip data has been processed minimally from the shell. The only alteration done on the data with unix was just compressing it to gzipped format. This step was performed to reduce the disk space required to hold the data.  
+
+The summer and winter data were then read into R separately. Thanks to "data.table" package, reading and subsequent binding of datasets can be done faster and more efficiently.
+```{r summer_and_winter, message=FALSE}
+summer_trips <- read_taxi_data(summer_months, cols_selected)
+winter_trips <- read_taxi_data(winter_months, cols_selected)
+
+cat(paste0("Number of records in summer data: ", dim(summer_trips)[1],
+           "\n",
+            "Number of records in winter data: ", dim(winter_trips)[1])
+)
+```
+
+The trips data were then merged together to give us a dataframe to work on for the analysis. An extra attribute that captures the duration of all trips could also be added to the data by computing the time difference between pickup and dropoff as recorded by taximeter. Structure of the resultant merged dataframe (data.table) is shown below.
+
+```{r merge_summer_winter}
+# bind summer and winter data together
+trips_data <- rbindlist(list(summer=summer_trips, winter=winter_trips),
+                        idcol="Season")
+
+# to save space
+rm(summer_trips, winter_trips)
+
+# convert to date objects and find difference
+setnames(trips_data, 
+         old=c("lpep_pickup_datetime", "Lpep_dropoff_datetime"),
+         new=c("Pickup_datetime", "Dropoff_datetime"))
+trips_data[, Pickup_datetime := ymd_hms(Pickup_datetime)]
+trips_data[, Dropoff_datetime := ymd_hms(Dropoff_datetime)]
+trips_data[, Trip_duration := difftime(Dropoff_datetime,
+                                       Pickup_datetime,
+                                       units="mins") %>% as.numeric() %>% round(digits=1)]
+
+str(trips_data)
+```
+
+Taxi zones location and geospatial information were also read in to assist our analysis on the trips data.  
+
+External data (weather), filter to months
+
+```{r lookup_shapefile}
+zones_lookup <- read_csv("data/taxi+_zone_lookup.csv", col_types="iccc")
+taxi_zones <- readOGR(dsn = "data/taxi_zones/taxi_zones.shp", verbose=FALSE)
+
+weather <- read_csv("data/central_park_weather.csv", col_types="ccDddddii") %>%
+  filter(month(DATE) %in% c(summer_months, winter_months))
+```
+
+
+Assuming the taxi trip data contains no duplicate records for any single trip, we can then continue with data cleansing and preprocessing. 
+
+## Data Cleansing
+
+It is important to clean the data as removing incorrect information can improve the data quality and in doing so, increases overal productivity. Note that here I cleaned only the taxi trip data as it is ultimately the one to be analysed. Any other data such as the zone information or weather data from external sources to aid in downstream analysis will be assumed to be clean.  
+
+The trips data has been checked and none of rows - with chosen attributes contains missing value. It is great because we do not have to worry about losing useful data or doing missing value imputation.
+
+
+```{r missing_val}
+cat(paste(
+  "Number of rows with missing value(s) in trips data:",
+  sum(rowSums(is.na(trips_data)))
+  )
+)
+```
+
+Next the data was checked to remove any abnormal or wrong records. This step is important as it ensures the data is correct, consistent and useable by identifying any errors or inaccurate information in the data. Since manually correcting the data requires huge amount of time and relevant domain knowledge, I decided to simply remove trip records that contain any obvious errors.
+
+Trip records have been checked and filtered out according to the following defined errors:  
+- The number of passengers in the vehicle $== 0$ or $> 7$  
+- Credit card tips or total amount paid of $< 0$  
+- Extremely short trip distance reported by taximeter, ie $== 0$  
+
+Since the objective is to gain better understanding at the big picture, we also want to remove outliers in the data since they are so rare, uninteresting and may not contribute much to the downstream analysis. Examples of outliers that present are trip records with:  
+- Pickup or dropoff outside of New York City, ie Latitude $\notin (39, 42)$ or Longitude $\notin (-76, -72)$  
+  * only trips within New York are of interest, exact location of New York is [40°39′40″N 73°56′38″W](https://en.wikipedia.org/wiki/New_York_City)  
+- Trip duration of $< 1$ minute or $> 20$ hours  
+- Payment type of neither credit card nor cash  
+- Total amount paid $<= 0$  
+
+
+```{r data_cleaning}
+n_before <- dim(trips_data)[1]
+
+# do filtering
+trips_data <- trips_data[
+  !(Passenger_count == 0 | Passenger_count > 7 | 
+      Tip_amount < 0 | Total_amount <= 0 |
+      Trip_distance == 0 |
+      Pickup_latitude < 39 | Pickup_latitude > 42 |
+      Pickup_longitude < -76 | Pickup_longitude > -72 |
+      Dropoff_latitude < 39 | Dropoff_latitude > 42 |
+      Dropoff_longitude < -76 | Dropoff_longitude > -72 |
+      Trip_duration < 1 | Trip_duration > (20 * 60) |
+      Payment_type > 2),
+]
+n_after <- dim(trips_data)[1]
+
+cat(paste(
+  "Removed", n_before - n_after, "rows from the trips data")
+)
+```
+
+Now the trips data has been cleaned and we are left with higher quality information, we can now continue with data preprocessing for the analysis.
+
+## Data Preprocessing
+
+Merge taxi_zones data with zones_lookup$Service zone.  Also find intersect between location points and taxi zones
+```{r merge_intersect, warning=FALSE}
+# merge zone information with taxi service zone in lookup table
+taxi_zones@data <- taxi_zones@data %>%
+  left_join(zones_lookup %>% 
+              select(-LocationID, -Borough) %>%
+              unique(), 
+            by=c('zone' = 'Zone'))
+
+# reproject to commonly used CRS
+taxi_zones <- spTransform(taxi_zones, CRS("+init=epsg:4326"))
+
+# find intersect between trip locations and taxi zones
+trips_data[, 
+  Pickup_location := SpatialPointsDataFrame(coords=trips_data[, c('Pickup_longitude', 'Pickup_latitude')],
+                                            data=trips_data,
+                                            proj4string=CRS(proj4string(taxi_zones))) %>%
+    over(taxi_zones) %>%
+    pull(OBJECTID)]
+
+trips_data[, 
+  Dropoff_location := SpatialPointsDataFrame(coords=trips_data[, c('Dropoff_longitude', 'Dropoff_latitude')],
+                                             data=trips_data,
+                                             proj4string=CRS(proj4string(taxi_zones))) %>%
+    over(taxi_zones) %>%
+    pull(OBJECTID)]
+
+
+# some trips may not fall in known taxi zones
+trips_data <- na.omit(trips_data)
+```
+
+We also need to preprocess datetime to extract day of week. Resultant of preprocessed dataframe is shown below
+```{r preprocess_date}
+trips_data[, Pickup_day := wday(Pickup_datetime, label=TRUE)]
+trips_data[, Pickup_hour := hour(Pickup_datetime)]
+trips_data[, Dropoff_day := wday(Dropoff_datetime, label=TRUE)]
+trips_data[, Dropoff_hour := hour(Dropoff_datetime)]
+trips_data[, Pickup_datetime := as_date(Pickup_datetime)]
+trips_data[, Dropoff_datetime := as_date(Dropoff_datetime)]
+
+setnames(trips_data, 
+         old=c("Pickup_datetime", "Dropoff_datetime"),
+         new=c("Pickup_date", "Dropoff_date"))
+
+trips_data <- as_tibble(trips_data)
+glimpse(trips_data)
+```
+
+
+----------------------------------------------------------------------------------------------------------
+
+# Findings and Analysis
+
+## What affects tipping behaviour of passenger
+
+
+```{r tipping}
+# Find trips that passenger actually tipped
+trips_data %>%
+  filter(Payment_type == 1) %>%
+  mutate(Tipping_percentage = Tip_amount / Total_amount) %>%
+  group_by(Season, Pickup_day, Pickup_hour) %>%
+  summarise(Tipping_percentage = mean(Tipping_percentage)) %>%
+  ggplot(aes(x=Pickup_day, y=Pickup_hour, fill=Tipping_percentage)) +
+  geom_tile() +
+  scale_fill_distiller(palette="Spectral") +
+  scale_y_continuous(breaks=seq(0, 23)) +
+  facet_grid(. ~ Season) +
+  theme_bw() +
+  labs(x="Day of the week", y="Hour of the day")
+  
+  
+ trips_data %>%
+  sample_n(1000000) %>%
+  ggplot() +
+  geom_histogram(aes(x=Trip_distance, fill=..count..))
+```
+
+
+
+
+## Usage of taxi at different days (leaflet?) at different boroughs
+
+## Testing 
+```{r}
+library(rgdal)
+lnd <- readOGR(dsn = "data/Creating-maps-in-R-master/data/london_sport.shp")
+lnd$Pop_2001 <- as.numeric(as.character(lnd$Pop_2001))
+```
+
+```{r}
+plot(lnd, col = "lightgrey") # plot the london_sport object
+sel <- lnd$Partic_Per > 25
+head(lnd@data)
+plot(lnd[ sel, ], col = "turquoise", add = TRUE) # add selected zones to map
+```
+
+
+```{r}
+crime_data <- read.csv("data/Creating-maps-in-R-master/data/mps-recordedcrime-borough.csv",
+  stringsAsFactors = FALSE)
+
+head(crime_data$CrimeType) # information about crime type
+
+# Extract "Theft & Handling" crimes and save
+crime_theft <- crime_data[crime_data$CrimeType == "Theft & Handling", ]
+head(crime_theft, 2) # take a look at the result (replace 2 with 10 to see more rows)
+
+# Calculate the sum of the crime count for each district, save result
+crime_ag <- aggregate(CrimeCount ~ Borough, FUN = sum, data = crime_theft)
+# Show the first two rows of the aggregated crime data
+head(crime_ag, 2)
+```
+
+```{r}
+library(dplyr)
+lnd@data <- left_join(lnd@data, crime_ag, by = c('name' = 'Borough'))
+head(lnd@data)
+```
+
+```{r}
+library(tmap) # load tmap package (see Section IV)
+qtm(lnd, "CrimeCount") # plot the basic map
+```
+
+```{r}
+stations <- readOGR(dsn = "data/Creating-maps-in-R-master/data/lnd-stns.shp")
+proj4string(stations)
+proj4string(lnd)
+bbox(stations) # the extent, 'bounding box' of stations
+bbox(lnd) # return the bounding box of the lnd object
+```
+
+```{r}
+stations <- spTransform(stations, CRSobj = CRS(proj4string(lnd)))
+plot(lnd) # plot London 
+points(stations) # overlay the station points
+
+stations <- stations[lnd,]
+plot(stations)
+```
+
+```{r}
+library(tmap)
+vignette("tmap-nutshell")
+
+qtm(shp = lnd, fill = c("Partic_Per", "Pop_2001"), fill.palette = "Blues", ncol = 2)
+```
+
+
+```{r}
+tm_shape(lnd) +
+  tm_fill("Pop_2001", thres.poly = 0) +
+  tm_facets("name", free.coords = TRUE, drop.units = TRUE)
+```
+
+```{r}
+lnd_f <- broom::tidy(lnd)
+head(lnd_f, n = 2) # peak at the fortified data
+lnd$id <- row.names(lnd) # allocate an id variable to the sp data
+head(lnd@data, n = 2) # final check before join (requires shared variable name)
+lnd_f <- left_join(lnd_f, lnd@data) # join the data
+head(lnd_f, 2)
+```
+
+```{r}
+library(ggplot2)
+ggplot(lnd_f, aes(long, lat, group = group, fill = Partic_Per)) +
+  geom_polygon() + coord_equal() +
+  labs(x = "Easting (m)", y = "Northing (m)",
+    fill = "% Sports\nParticipation") +
+  ggtitle("London Sports Participation") +
+  scale_fill_gradient(low = "white", high = "black")
+```
+
+## R Markdown
+
+This is an R Markdown document. Markdown is a simple formatting syntax for authoring HTML, PDF, and MS Word documents. For more details on using R Markdown see <http://rmarkdown.rstudio.com>.
+
+When you click the **Knit** button a document will be generated that includes both content as well as the output of any embedded R code chunks within the document. You can embed an R code chunk like this:
+
+```{r cars}
+summary(cars)
+```
+
+## Including Plots
+
+You can also embed plots, for example:
+
+```{r pressure}
+plot(pressure)
+```
+
+Note that the `echo = FALSE` parameter was added to the code chunk to prevent printing of the R code that generated the plot.
