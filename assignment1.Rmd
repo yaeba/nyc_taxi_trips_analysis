@@ -203,7 +203,8 @@ taxi_zones <- readOGR(dsn = "data/taxi_zones/taxi_zones.shp", verbose=FALSE)
 
 weather <- read_csv("data/central_park_weather.csv", col_types="ccDddddii") %>%
   filter(month(DATE) %in% c(summer_months, winter_months)) %>%
-  select(-c("STATION", "NAME"))
+  mutate(AVG_T = (TMAX + TMIN) / 2) %>%
+  select(-c("STATION", "NAME", "TMAX", "TMIN"))
 ```
 
 
@@ -329,6 +330,13 @@ saveRDS(trips_data, file="data/trips_data.rds")
 ```{r taxi_usage}
 # Time and day
 trips_data %>%
+  group_by(Season, Pickup_day) %>%
+  summarise(Num_trips = n()) %>%
+  ggplot(aes(x=Pickup_day, y=Num_trips, fill=Season)) +
+  geom_bar(stat="identity", position=position_dodge(), colour="black")
+
+
+trips_data %>%
   group_by(Season, Pickup_day, Pickup_hour) %>%
   summarise(Num_trips = n()) %>%
   ggplot(aes(x=Pickup_day, y=Pickup_hour, fill=Num_trips)) +
@@ -343,27 +351,20 @@ trips_data %>%
 
 rescale <- function(x) (x - min(x))/(max(x) - min(x))
 
-
-trips_data %>%
-  group_by(Season, Pickup_date) %>%
-  summarise(Num_trips = n()) %>%
-  left_join(weather, by=c("Pickup_date" = "DATE")) %>%
-  ungroup() %>%
-  mutate_if(is.numeric, rescale) %>%
-  ggplot(aes(x=Pickup_date)) +
-  geom_line(aes(y=TMIN))
-
 trips_data %>%
   group_by(Season, Pickup_date) %>%
   summarise(Num_trips = n()) %>%
   ungroup() %>%
   left_join(weather, by=c("Pickup_date" = "DATE")) %>%
-  mutate(Average_temp = (TMAX + TMIN) / 2) %>%
-  ggplot() +
-  geom_point(aes(x=Average_temp, y=Num_trips, color=Season)) +
-  geom_smooth(aes(x=Average_temp, y=Num_trips, color=Season, fill=Season), method=lm)
+  gather(AWND:AVG_T, key="Measure", value="Value") %>%
+  ggplot(aes(x=Value, y=Num_trips, color=Season)) +
+  geom_point() +
+  geom_smooth(method=lm) +
+  facet_wrap(Measure ~ ., scales="free_x")
+
 
 # Borough
+
 ```
 
 ## Weather and trip distance and duration
