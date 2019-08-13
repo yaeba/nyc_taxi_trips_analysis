@@ -316,7 +316,8 @@ glimpse(trips_data)
 ```
 
 ```{r}
-saveRDS(trips_data, file="data/trips_data.rds")
+# saveRDS(trips_data, file="data/trips_data.rds")
+trips_data <- readRDS("data/trips_data.rds")
 ```
 
 
@@ -325,55 +326,33 @@ saveRDS(trips_data, file="data/trips_data.rds")
 # Findings and Analysis
 
 
-## What affects usage of taxi
-
-```{r taxi_usage}
-# Time and day
-trips_data %>%
-  group_by(Season, Pickup_day) %>%
-  summarise(Num_trips = n()) %>%
-  ggplot(aes(x=Pickup_day, y=Num_trips, fill=Season)) +
-  geom_bar(stat="identity", position=position_dodge(), colour="black")
-
-
-trips_data %>%
-  group_by(Season, Pickup_day, Pickup_hour) %>%
-  summarise(Num_trips = n()) %>%
-  ggplot(aes(x=Pickup_day, y=Pickup_hour, fill=Num_trips)) +
-  geom_tile() +
-  scale_fill_distiller(palette="Spectral") +
-  scale_y_continuous(breaks=seq(0, 23)) +
-  facet_grid(. ~ Season) +
-  theme_bw() +
-  labs(x="Day of the week", y="Hour of the day")
-
-# Weather
-
-rescale <- function(x) (x - min(x))/(max(x) - min(x))
-
-trips_data %>%
-  group_by(Season, Pickup_date) %>%
-  summarise(Num_trips = n()) %>%
-  ungroup() %>%
-  left_join(weather, by=c("Pickup_date" = "DATE")) %>%
-  gather(AWND:AVG_T, key="Measure", value="Value") %>%
-  ggplot(aes(x=Value, y=Num_trips, color=Season)) +
-  geom_point() +
-  geom_smooth(method=lm) +
-  facet_wrap(Measure ~ ., scales="free_x")
-
-
-# Borough
-
-```
-
-## Weather and trip distance and duration
-
-## What affects tipping behaviour of passenger
-
-
+## What affects tipping
 ```{r tipping}
-# Find ratio of tipping to the total amount paid by passenger
+
+
+# Trip distance vs Tipping
+n <- 100
+trips_data %>%
+  filter(Payment_type == 1) %>%
+  mutate(Bin = cut_number(Trip_distance, n)) %>%
+  group_by(Bin) %>%
+  summarise(Trip_distance = mean(Trip_distance),
+            Number = n(),
+            Tip_amount = mean(Tip_amount),
+            Total_amount = mean(Total_amount),
+            Tipping_percentage = mean(Tip_amount / Total_amount),
+            Trip_duration = mean(Trip_duration)) %>%
+  ungroup() %>%
+  gather(Tip_amount:Trip_duration, key="Measure", value="Value") %>%
+  ggplot(aes(x=Trip_distance, y=Value, color=Number)) +
+  geom_point() +
+  facet_wrap(Measure ~ ., scales="free_y") +
+  theme_bw()
+  
+
+
+
+# Time and day vs Tipping percentage
 trips_data %>%
   filter(Payment_type == 1) %>%
   group_by(Season, Pickup_day, Pickup_hour) %>%
@@ -384,15 +363,148 @@ trips_data %>%
   scale_y_continuous(breaks=seq(0, 23)) +
   facet_grid(. ~ Season) +
   theme_bw() +
-  labs(x="Day of the week", y="Hour of the day")
-  
+  labs(x="Day of the week", y="Hour of the day",
+       title="Tipping percentage at different times of days")
+
+#taxi_zones@data <- taxi_zones@data %>% select(-c(Tipping_percentage))
+# Boroughs with pickups with most tipping percentage
+taxi_zones@data <- taxi_zones@data %>%
+  left_join(
+    trips_data %>%
+      group_by(Pickup_location) %>%
+      summarise(Tipping_percentage = mean(Tip_amount / Total_amount)),
+    by=c("OBJECTID"="Pickup_location"))
+
+qtm(shp=taxi_zones, fill = "Tipping_percentage", fill.palette = "Blues") +
+  tm_legend(main.title = "Ratio of tips to total amount for each pickup taxi zone",
+            main.title.size = 1)
+```
+Zones with highest tipping percentage
+1                      Hudson Sq          0.2603203
+2         Charleston/Tottenville          0.2258583
+3 Stuy Town/Peter Cooper Village          0.2000000
+4                  Arden Heights          0.1999171
+
+## What affects usage of taxi
+
+```{r taxi_usage}
+trips_data <- trips_data %>%
+  mutate(Time=ifelse(Pickup_hour >=6 & Pickup_hour < 18,
+                     "Daytime",
+                     "Nighttime"))
+
+# Day trip and night trip
+trips_data %>%
+  group_by(Season, Pickup_day, Time) %>%
+  summarise(Num_trips = n()) %>%
+  ungroup() %>%
+  ggplot(aes(x=Pickup_day, y=Num_trips, fill=Time)) +
+  geom_bar(stat="identity", position=position_dodge(), colour="black") +
+  facet_grid(. ~ Season) +
+  theme_bw() +
+  labs(x="Day of the week", y="Number of taxi trips",
+       title="Taxi pickups in daytime and nighttime across days of week")
+
+# Time and day
+trips_data %>%
+  group_by(Season, Pickup_day, Pickup_hour) %>%
+  summarise(Num_trips = n()) %>%
+  ungroup() %>%
+  ggplot(aes(x=Pickup_day, y=Pickup_hour, fill=Num_trips)) +
+  geom_tile() +
+  scale_fill_distiller(palette="Spectral") +
+  scale_y_continuous(breaks=seq(0, 23)) +
+  facet_grid(. ~ Season) +
+  theme_bw() +
+  labs(x="Day of the week", y="Hour of the day",
+       title="Taxi pickups at different times of days")
+
+
+# How likely to get long trip in daytime and nighttime
+long_trip <- as.numeric(quantile(trips_data$Trip_distance, 0.8))
+trips_data %>%
+  group_by(Pickup_day, Time) %>%
+  summarise(Long_trips = mean(Trip_distance > long_trip)) %>%
+  ungroup() %>%
+  ggplot(aes(x=Pickup_day, y=Long_trips, fill=Time)) +
+  geom_bar(stat="identity", position=position_dodge(), colour="black") +
+  theme_bw() +
+  labs(x="Day of the week", y="Probability of long trip",
+       title=paste0("How likely to get a long trip (>", long_trip, " miles)"))
+
+
+#taxi_zones@data <- taxi_zones@data %>% select(-c(Daytime, Nighttime))
+# Boroughs with most trips in daytime and nighttime
+taxi_zones@data <- taxi_zones@data %>%
+  left_join(
+    trips_data %>%
+      group_by(Time, Pickup_location) %>%
+      summarise(Num_trips = n()) %>%
+      spread(key=Time, value=Num_trips),
+    by=c("OBJECTID"="Pickup_location"))
+
+qtm(shp=taxi_zones, fill = c("Daytime", "Nighttime"), fill.palette = "Blues", ncol = 2) +
+  tm_legend(main.title = "Frequency of pickups in daytime and nighttime for each taxi zone",
+            main.title.size = 1)
+
 # Weather
+trips_data %>%
+  group_by(Season, Pickup_date) %>%
+  summarise(Num_trips = n()) %>%
+  ungroup() %>%
+  left_join(weather, by=c("Pickup_date" = "DATE")) %>%
+  gather(AWND:AVG_T, key="Measure", value="Value") %>%
+  ggplot(aes(x=Value, y=Num_trips, color=Season)) +
+  geom_point() +
+  geom_smooth(method=lm) +
+  facet_wrap(Measure ~ ., scales="free_x") +
+  labs(x="Value of measurement", y="Frequency of pickups",
+       title="Weather condition vs frequency of pickups of every day")
+
+
+# Weather
+trips_data %>%
+  filter(Payment_type == 1) %>%
+  group_by(Season, Pickup_date) %>%
+  summarise(Tipping_percentage = mean(Tip_amount / Total_amount)) %>%
+  ungroup() %>%
+  left_join(weather, by=c("Pickup_date" = "DATE")) %>%
+  gather(AWND:AVG_T, key="Measure", value="Value") %>%
+  ggplot(aes(x=Value, y=Tipping_percentage, color=Season)) +
+  geom_point() +
+  geom_smooth(method=lm) +
+  facet_wrap(Measure ~ ., scales="free_x")
+```
+Zones with most pickup in daytime:
+1   East Harlem North  263803
+2   East Harlem South  261508
+3      Central Harlem  243942
+4 Morningside Heights  193691
+
+Zones with most pickup in nighttime:
+1 Williamsburg (North Side)    340581
+2                   Astoria    244592
+3                  Elmhurst    217167
+4            Central Harlem    207715
+
+East Harlem South and Morningside Heights have more pickups in daytime than in nighttime.
+Williamsbug North and South have more pickups in nighttime than in daytime.
+
+
+## Weather and trip distance and duration
+
+
+## Trip distance and tipping, weather and trip distance, weather and tipping, tipping and average speed
+## What affects tipping behaviour of passenger
+
+
+
+```{r}
+
 ```
 
 
-
-
-## Usage of taxi at different days (leaflet?) at different boroughs
+## Usage of taxi at different days (leaflet?) at different boroughs, taxi pickup and dropoff at different location. taxi best tipping dropoff for every pickup
 
 ## Testing 
 ```{r}
