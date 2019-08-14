@@ -145,11 +145,13 @@ winter_months <- c(12, 1, 2)
 Attributes ... have been chosen for analysis.
 
 ```{r}
+# columns needed for the analysis
 cols_selected <- c("lpep_pickup_datetime", "Lpep_dropoff_datetime",
                    "Trip_distance", "Tip_amount", "Total_amount",
                    "Passenger_count", "Payment_type", 
                    "Pickup_latitude", "Pickup_longitude",
-                   "Dropoff_latitude", "Dropoff_longitude")
+                   "Dropoff_latitude", "Dropoff_longitude",
+                   "RateCodeID")
 ```
 
 
@@ -170,7 +172,7 @@ cat(paste0("Number of records in summer data: ", dim(summer_trips)[1],
 )
 ```
 
-The trips data were then merged together to give us a dataframe to work on for the analysis. An extra attribute that captures the duration of all trips could also be added to the data by computing the time difference between pickup and dropoff as recorded by taximeter. Structure of the resultant merged dataframe (data.table) is shown below.
+The trips data were then merged together to give us a dataframe to work on for the analysis. An extra attribute that captures the duration of all trips could also be added to the data by computing the time difference between pickup and dropoff as recorded by taximeter.
 
 ```{r merge_summer_winter}
 # bind summer and winter data together
@@ -190,7 +192,6 @@ trips_data[, Trip_duration := difftime(Dropoff_datetime,
                                        Pickup_datetime,
                                        units="mins") %>% as.numeric() %>% round(digits=1)]
 
-str(trips_data)
 ```
 
 Taxi zones location and geospatial information were also read in to assist our analysis on the trips data.  
@@ -298,25 +299,50 @@ trips_data[,
 trips_data <- na.omit(trips_data)
 ```
 
-We also need to preprocess datetime to extract day of week. Resultant of preprocessed dataframe is shown below
+
+We will consider airport taxi rides as trips that terminated at the 3 NYC area airports: John F. Kennedy International Airport (JFK), LaGuardia Airport (LGA), and the Newark Liberty International Airport (EWR). Any trip that satifies the following criteria is defined as an aiport trip.
+
+- RateCodeID of 2 (JFK) or 3 (EWR)  
+- Dropoff at JFK, LGA or EWR zone  
+
+```{r identify_airport_trips}
+# find airport zones from all taxi zones
+airport_zones <- taxi_zones@data %>%
+  filter(service_zone %in% c("Airports", "EWR")) %>%
+  select(OBJECTID, zone)
+
+# identify airport trips
+trips_data[, 
+  Airport_trip := Dropoff_location %in% airport_zones | RateCodeID %in% c(2, 3)]
+
+
+cat(paste(
+  sum(trips_data$Airport_trip), "trips defined as airport trips")
+)
+```
+
+
+We also need to preprocess datetime to extract the exact hour of day and day of week. The datetime attribute is then replaced by just date for use in analysis coupled with weather data. Resultant of preprocessed dataframe is shown below
 ```{r preprocess_date}
 trips_data[, Pickup_day := wday(Pickup_datetime, label=TRUE)]
 trips_data[, Pickup_hour := hour(Pickup_datetime)]
-trips_data[, Dropoff_day := wday(Dropoff_datetime, label=TRUE)]
-trips_data[, Dropoff_hour := hour(Dropoff_datetime)]
 trips_data[, Pickup_datetime := as_date(Pickup_datetime)]
-trips_data[, Dropoff_datetime := as_date(Dropoff_datetime)]
 
-setnames(trips_data, 
-         old=c("Pickup_datetime", "Dropoff_datetime"),
-         new=c("Pickup_date", "Dropoff_date"))
 
-trips_data <- as_tibble(trips_data)
+# identify day trips and night trips
+trips_data[, Time := ifelse(Pickup_hour >= 6 & Pickup_hour < 18,
+                            "Daytime",
+                            "Nighttime") %>% as.factor()]
+
+# convert to tibble for ggplot
+trips_data <- as_tibble(trips_data) %>%
+  rename(Pickup_date = Pickup_datetime)
+
 glimpse(trips_data)
 ```
 
 ```{r}
-# saveRDS(trips_data, file="data/trips_data.rds")
+saveRDS(trips_data, file="data/trips_data.rds")
 trips_data <- readRDS("data/trips_data.rds")
 ```
 
@@ -328,8 +354,6 @@ trips_data <- readRDS("data/trips_data.rds")
 
 ## What affects tipping
 ```{r tipping}
-
-
 # Trip distance vs Tipping
 n <- 100
 trips_data %>%
@@ -367,7 +391,7 @@ trips_data %>%
        title="Tipping percentage at different times of days")
 
 #taxi_zones@data <- taxi_zones@data %>% select(-c(Tipping_percentage))
-# Boroughs with pickups with most tipping percentage
+# Zones with pickups with most tipping percentage
 taxi_zones@data <- taxi_zones@data %>%
   left_join(
     trips_data %>%
@@ -388,11 +412,6 @@ Zones with highest tipping percentage
 ## What affects usage of taxi
 
 ```{r taxi_usage}
-trips_data <- trips_data %>%
-  mutate(Time=ifelse(Pickup_hour >=6 & Pickup_hour < 18,
-                     "Daytime",
-                     "Nighttime"))
-
 # Day trip and night trip
 trips_data %>%
   group_by(Season, Pickup_day, Time) %>%
@@ -421,7 +440,7 @@ trips_data %>%
 
 
 # How likely to get long trip in daytime and nighttime
-long_trip <- as.numeric(quantile(trips_data$Trip_distance, 0.8))
+long_trip <- as.numeric(quantile(trips_data$Trip_distance, 0.75))
 trips_data %>%
   group_by(Pickup_day, Time) %>%
   summarise(Long_trips = mean(Trip_distance > long_trip)) %>%
@@ -434,7 +453,7 @@ trips_data %>%
 
 
 #taxi_zones@data <- taxi_zones@data %>% select(-c(Daytime, Nighttime))
-# Boroughs with most trips in daytime and nighttime
+# Zones with most trips in daytime and nighttime
 taxi_zones@data <- taxi_zones@data %>%
   left_join(
     trips_data %>%
@@ -447,34 +466,8 @@ qtm(shp=taxi_zones, fill = c("Daytime", "Nighttime"), fill.palette = "Blues", nc
   tm_legend(main.title = "Frequency of pickups in daytime and nighttime for each taxi zone",
             main.title.size = 1)
 
-# Weather
-trips_data %>%
-  group_by(Season, Pickup_date) %>%
-  summarise(Num_trips = n()) %>%
-  ungroup() %>%
-  left_join(weather, by=c("Pickup_date" = "DATE")) %>%
-  gather(AWND:AVG_T, key="Measure", value="Value") %>%
-  ggplot(aes(x=Value, y=Num_trips, color=Season)) +
-  geom_point() +
-  geom_smooth(method=lm) +
-  facet_wrap(Measure ~ ., scales="free_x") +
-  labs(x="Value of measurement", y="Frequency of pickups",
-       title="Weather condition vs frequency of pickups of every day")
-
-
-# Weather
-trips_data %>%
-  filter(Payment_type == 1) %>%
-  group_by(Season, Pickup_date) %>%
-  summarise(Tipping_percentage = mean(Tip_amount / Total_amount)) %>%
-  ungroup() %>%
-  left_join(weather, by=c("Pickup_date" = "DATE")) %>%
-  gather(AWND:AVG_T, key="Measure", value="Value") %>%
-  ggplot(aes(x=Value, y=Tipping_percentage, color=Season)) +
-  geom_point() +
-  geom_smooth(method=lm) +
-  facet_wrap(Measure ~ ., scales="free_x")
 ```
+
 Zones with most pickup in daytime:
 1   East Harlem North  263803
 2   East Harlem South  261508
@@ -490,12 +483,127 @@ Zones with most pickup in nighttime:
 East Harlem South and Morningside Heights have more pickups in daytime than in nighttime.
 Williamsbug North and South have more pickups in nighttime than in daytime.
 
+```{r airport_trips}
+# Trip distance by hour of day
+trips_data %>%
+  group_by(Pickup_hour) %>%
+  summarise(Mean = mean(Trip_distance),
+            Median = median(Trip_distance)) %>%
+  ungroup() %>%
+  gather(Mean:Median, key="Trip_distance", value="Value") %>%
+  ggplot(aes(x=Pickup_hour, y=Value)) +
+  geom_line(aes(color=Trip_distance, linetype=Trip_distance), size=1) +
+  theme_bw() +
+  labs(x="Pickup hour", y="Distance in miles",
+       title="Mean and median trip distance by hour of day")
 
-## Weather and trip distance and duration
+
+# Percentage of airport trips per hour
+trips_data %>%
+  group_by(Pickup_hour) %>%
+  summarise(Airport_percent = mean(Airport_trip)) %>%
+  ungroup() %>%
+  ggplot(aes(x=Pickup_hour, y=Airport_percent)) +
+  geom_bar(stat="identity") +
+  theme_bw() +
+  labs(x="Pickup hour", y="Percent of trips to airport",
+       title="Percent of trips to airport by hour of day")
 
 
-## Trip distance and tipping, weather and trip distance, weather and tipping, tipping and average speed
-## What affects tipping behaviour of passenger
+# Zones with most trips in daytime and nighttime
+taxi_zones@data <- taxi_zones@data %>%
+  left_join(
+    trips_data %>%
+      filter(Airport_trip) %>%
+      group_by(Pickup_location) %>%
+      summarise(Airport_trips = n()) %>%
+      ungroup(),
+    by=c("OBJECTID"="Pickup_location"))
+
+
+
+qtm(shp=taxi_zones, fill = "Airport_trips", fill.palette = "Blues") +
+  qtm(taxi_zones[taxi_zones$zone %in% airport_zones$zone,], fill="red") +
+  tm_legend(main.title = "Ratio of tips to total amount for each pickup taxi zone",
+            main.title.size = 1)
+```
+Mean distances were constantly higher than median distance during each hour. This is most likely because the distribution of trip distance is right-skewed, and the mean could be inflated by a few long-distance trips. As such, the median is a fairer representation of the central tendency of all distances.  
+
+the distance of a typical green taxi trip fluctuated around 2 miles during most time of the day. Trips started during 4:00 PM to 6:00 PM tended to be the shortest, and trips started between 4:00 AM and 6:00 AM were the longest. The surge in long-distance trips during the morning is likely driven by trips to the airports or other long-distance rides. As shown above, the sudden increase in percent of taxi rides to airport closely matches the increase in hourly mean and median distance.
+```{r weather}
+# Weather vs Number of trips
+trips_data %>%
+  group_by(Season, Pickup_date) %>%
+  summarise(Num_trips = n()) %>%
+  ungroup() %>%
+  left_join(weather, by=c("Pickup_date" = "DATE")) %>%
+  gather(AWND:AVG_T, key="Measure", value="Value") %>%
+  ggplot(aes(x=Value, y=Num_trips, color=Season)) +
+  geom_point() +
+  geom_smooth(method=lm) +
+  facet_wrap(Measure ~ ., scales="free_x") +
+  labs(x="Value of measurement", y="Frequency of pickups",
+       title="Weather condition vs frequency of pickups of every day")
+
+
+# Weather vs Tipping percentage
+trips_data %>%
+  filter(Payment_type == 1) %>%
+  group_by(Season, Pickup_date) %>%
+  summarise(Tipping_percentage = mean(Tip_amount / Total_amount)) %>%
+  ungroup() %>%
+  left_join(weather, by=c("Pickup_date" = "DATE")) %>%
+  gather(AWND:AVG_T, key="Measure", value="Value") %>%
+  ggplot(aes(x=Value, y=Tipping_percentage, color=Season)) +
+  geom_point() +
+  geom_smooth(method=lm) +
+  facet_wrap(Measure ~ ., scales="free_x")
+
+
+# Weather vs Total amount
+trips_data %>%
+  group_by(Season, Pickup_date) %>%
+  summarise(Total_amount = mean(Total_amount)) %>%
+  ungroup() %>%
+  left_join(weather, by=c("Pickup_date" = "DATE")) %>%
+  gather(AWND:AVG_T, key="Measure", value="Value") %>%
+  ggplot(aes(x=Value, y=Total_amount, color=Season)) +
+  geom_point() +
+  geom_smooth(method=lm) +
+  facet_wrap(Measure ~ ., scales="free_x")
+
+# Weather vs Trip distance
+trips_data %>%
+  group_by(Season, Pickup_date) %>%
+  summarise(Trip_distance = mean(Trip_distance)) %>%
+  ungroup() %>%
+  left_join(weather, by=c("Pickup_date" = "DATE")) %>%
+  gather(AWND:AVG_T, key="Measure", value="Value") %>%
+  ggplot(aes(x=Value, y=Trip_distance, color=Season)) +
+  geom_point() +
+  geom_smooth(method=lm) +
+  facet_wrap(Measure ~ ., scales="free_x")
+
+
+# Weather vs Trip duration
+trips_data %>%
+  group_by(Season, Pickup_date) %>%
+  summarise(Trip_duration = mean(Trip_duration)) %>%
+  ungroup() %>%
+  left_join(weather, by=c("Pickup_date" = "DATE")) %>%
+  gather(AWND:AVG_T, key="Measure", value="Value") %>%
+  ggplot(aes(x=Value, y=Trip_duration, color=Season)) +
+  geom_point() +
+  geom_smooth(method=lm) +
+  facet_wrap(Measure ~ ., scales="free_x")
+```
+
+Days when raining or snowing, number of trips very different from regular days. Location? Under bridge or metro station? Plot on map
+```{r}
+nyc_map <- get_map(location = c(lon = -74.00, lat = 40.71), maptype = "terrain", zoom = 11)
+```
+
+
 
 
 
