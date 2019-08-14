@@ -14,7 +14,7 @@ output:
 ---
 
 ```{r setup, include=FALSE}
-knitr::opts_chunk$set(echo = TRUE)
+knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE)
 ```
 
 
@@ -38,22 +38,23 @@ Central Park weather data comes from [National Climatic Data Center](https://www
 ## Another external data
 
 
-## Load libraries and helper functionsz
+## Load libraries and helper functions
 
 Put all libraries and descrpitions here
 
-```{r libraries, message=FALSE}
+```{r libraries}
 library(tidyverse)
 library(data.table)
 library(ggmap)
 library(tmap)
+library(tmaptools)
 library(rgdal)
 library(lubridate)
 ```
 
-Functions 
+Function  
 
-```{r helper_funcs}
+```{r helper_func}
 read_taxi_data <- function(months, cols) {
   dfs <- list()
   for (i in sprintf("%02d", months)) {
@@ -63,64 +64,8 @@ read_taxi_data <- function(months, cols) {
   rbindlist(dfs)
 }
 
-restart_r <- function() {
-  rm(list=ls())
-  .rs.restartR()
-}
-
-m <- function() pryr::mem_used()
-
 ```
 
-*multiplot* function, courtesy of [R Cookbooks](http://www.cookbook-r.com/Graphs/Multiple_graphs_on_one_page_(ggplot2)/) to create multi-panel plots.
-
-```{r multiplot}
-# Multiple plot function
-#
-# ggplot objects can be passed in ..., or to plotlist (as a list of ggplot objects)
-# - cols:   Number of columns in layout
-# - layout: A matrix specifying the layout. If present, 'cols' is ignored.
-#
-# If the layout is something like matrix(c(1,2,3,3), nrow=2, byrow=TRUE),
-# then plot 1 will go in the upper left, 2 will go in the upper right, and
-# 3 will go all the way across the bottom.
-#
-multiplot <- function(..., plotlist=NULL, file, cols=1, layout=NULL) {
-  library(grid)
-
-  # Make a list from the ... arguments and plotlist
-  plots <- c(list(...), plotlist)
-
-  numPlots = length(plots)
-
-  # If layout is NULL, then use 'cols' to determine layout
-  if (is.null(layout)) {
-    # Make the panel
-    # ncol: Number of columns of plots
-    # nrow: Number of rows needed, calculated from # of cols
-    layout <- matrix(seq(1, cols * ceiling(numPlots/cols)),
-                    ncol = cols, nrow = ceiling(numPlots/cols))
-  }
-
- if (numPlots==1) {
-    print(plots[[1]])
-
-  } else {
-    # Set up the page
-    grid.newpage()
-    pushViewport(viewport(layout = grid.layout(nrow(layout), ncol(layout))))
-
-    # Make each plot, in the correct location
-    for (i in 1:numPlots) {
-      # Get the i,j matrix positions of the regions that contain this subplot
-      matchidx <- as.data.frame(which(layout == i, arr.ind = TRUE))
-
-      print(plots[[i]], vp = viewport(layout.pos.row = matchidx$row,
-                                      layout.pos.col = matchidx$col))
-    }
-  }
-}
-```
 
 ----------------------------------------------------------------------------------------------------------
 
@@ -133,11 +78,11 @@ Green taxi data has been chosen for this analysis. Because ... and less space on
 I selected data from month.... because ... (summer and winter)
 ```{r}
 year <- 2015
-summer_months <- c(6, 7, 8)
-winter_months <- c(12, 1, 2)
+# summer_months <- c(6, 7, 8)
+# winter_months <- c(12, 1, 2)
 
-#summer_months <- c(7)
-#winter_months <- c(1)
+summer_months <- c(7)
+winter_months <- c(1)
 ```
 
 ## Attribute Selection
@@ -162,7 +107,7 @@ cols_selected <- c("lpep_pickup_datetime", "Lpep_dropoff_datetime",
 The NYC taxi trip data has been processed minimally from the shell. The only alteration done on the data with unix was just compressing it to gzipped format. This step was performed to reduce the disk space required to hold the data.  
 
 The summer and winter data were then read into R separately. Thanks to "data.table" package, reading and subsequent binding of datasets can be done faster and more efficiently.
-```{r summer_and_winter, message=FALSE}
+```{r summer_and_winter}
 summer_trips <- read_taxi_data(summer_months, cols_selected)
 winter_trips <- read_taxi_data(winter_months, cols_selected)
 
@@ -201,6 +146,7 @@ External data (weather), filter to months
 ```{r lookup_shapefile}
 zones_lookup <- read_csv("data/taxi+_zone_lookup.csv", col_types="iccc")
 taxi_zones <- readOGR(dsn = "data/taxi_zones/taxi_zones.shp", verbose=FALSE)
+taxi_zones$id <- row.names(taxi_zones)
 
 weather <- read_csv("data/central_park_weather.csv", col_types="ccDddddii") %>%
   filter(month(DATE) %in% c(summer_months, winter_months)) %>%
@@ -268,7 +214,7 @@ Now the trips data has been cleaned, we are left with higher quality information
 ## Data Preprocessing
 
 Merge taxi_zones data with zones_lookup$Service zone.  Also find intersect between location points and taxi zones
-```{r merge_intersect, warning=FALSE}
+```{r merge_intersect}
 # merge zone information with taxi service zone in lookup table
 taxi_zones@data <- taxi_zones@data %>%
   left_join(zones_lookup %>% 
@@ -313,7 +259,7 @@ airport_zones <- taxi_zones@data %>%
 
 # identify airport trips
 trips_data[, 
-  Airport_trip := Dropoff_location %in% airport_zones | RateCodeID %in% c(2, 3)]
+  Airport_trip := Dropoff_location %in% airport_zones$OBJECTID | RateCodeID %in% c(2, 3)]
 
 
 cat(paste(
@@ -336,14 +282,19 @@ trips_data[, Time := ifelse(Pickup_hour >= 6 & Pickup_hour < 18,
 
 # convert to tibble for ggplot
 trips_data <- as_tibble(trips_data) %>%
-  rename(Pickup_date = Pickup_datetime)
+  rename(Pickup_date = Pickup_datetime) %>%
+  select(-c(Dropoff_datetime, Passenger_count, 
+            Dropoff_latitude, Dropoff_longitude, RateCodeID))
 
 glimpse(trips_data)
 ```
 
-```{r}
-saveRDS(trips_data, file="data/trips_data.rds")
-trips_data <- readRDS("data/trips_data.rds")
+
+Checkpoint here  
+```{r save_load}
+# Uncomment to save or load the preprocessed dataframe
+#saveRDS(trips_data, file="data/trips_data.rds")
+#trips_data <- readRDS("data/trips_data.rds")
 ```
 
 
@@ -353,7 +304,7 @@ trips_data <- readRDS("data/trips_data.rds")
 
 
 ## What affects tipping
-```{r tipping}
+```{r distance_vs_vars, fig.cap="This is distance vs variables"}
 # Trip distance vs Tipping
 n <- 100
 trips_data %>%
@@ -371,11 +322,13 @@ trips_data %>%
   ggplot(aes(x=Trip_distance, y=Value, color=Number)) +
   geom_point() +
   facet_wrap(Measure ~ ., scales="free_y") +
-  theme_bw()
-  
+  theme_bw() +
+  labs(title="Relationship of trip distance with other variables")
 
 
+```
 
+```{r timeday_vs_tippercent, fig.cap="This is timeday vs tipping percentage"}
 # Time and day vs Tipping percentage
 trips_data %>%
   filter(Payment_type == 1) %>%
@@ -390,6 +343,10 @@ trips_data %>%
   labs(x="Day of the week", y="Hour of the day",
        title="Tipping percentage at different times of days")
 
+
+```
+
+```{r zones_tippercent, fig.cap="This is zones vs tipping percentage"}
 #taxi_zones@data <- taxi_zones@data %>% select(-c(Tipping_percentage))
 # Zones with pickups with most tipping percentage
 taxi_zones@data <- taxi_zones@data %>%
@@ -399,19 +356,32 @@ taxi_zones@data <- taxi_zones@data %>%
       summarise(Tipping_percentage = mean(Tip_amount / Total_amount)),
     by=c("OBJECTID"="Pickup_location"))
 
-qtm(shp=taxi_zones, fill = "Tipping_percentage", fill.palette = "Blues") +
-  tm_legend(main.title = "Ratio of tips to total amount for each pickup taxi zone",
-            main.title.size = 1)
+# qtm(shp=taxi_zones, fill = "Tipping_percentage", fill.palette = "Blues") +
+#   tm_legend(main.title = "Ratio of tips to total amount for each pickup taxi zone",
+#             main.title.size = 1)
+
+map <- get_stamenmap(as.numeric(bbox(taxi_zones)), zoom=10)
+ggmap(map) +
+  geom_polygon(data=fortify(taxi_zones) %>%
+                 left_join(taxi_zones@data),
+               aes(x=long, y=lat, group=group, fill=Tipping_percentage)) +
+  scale_fill_distiller(palette='Spectral') + 
+  labs(x="Longitude", y="Latitude",
+       title="Percent of tips to total amount for each pickup taxi zone")
 ```
 Zones with highest tipping percentage
 1                      Hudson Sq          0.2603203
 2         Charleston/Tottenville          0.2258583
 3 Stuy Town/Peter Cooper Village          0.2000000
-4                  Arden Heights          0.1999171
+4                  Arden Heights          0.1999171  
+
+
+referencing figure 1 here \@ref(fig:distance_vs_vars)  
+referencing figure 2 here \@ref(fig:timeday_vs_tippercent)  
 
 ## What affects usage of taxi
 
-```{r taxi_usage}
+```{r daytrip_vs_nighttrip, fig.cap="This is daytrip vs nighttrip"}
 # Day trip and night trip
 trips_data %>%
   group_by(Season, Pickup_day, Time) %>%
@@ -424,6 +394,9 @@ trips_data %>%
   labs(x="Day of the week", y="Number of taxi trips",
        title="Taxi pickups in daytime and nighttime across days of week")
 
+```
+
+```{r timeday_vs_numtrips, fig.cap="This is time and day vs number of trips"}
 # Time and day
 trips_data %>%
   group_by(Season, Pickup_day, Pickup_hour) %>%
@@ -438,7 +411,9 @@ trips_data %>%
   labs(x="Day of the week", y="Hour of the day",
        title="Taxi pickups at different times of days")
 
+```
 
+```{r daynight_vs_longtrip, fig.cap="This is daynight vs long trip"}
 # How likely to get long trip in daytime and nighttime
 long_trip <- as.numeric(quantile(trips_data$Trip_distance, 0.75))
 trips_data %>%
@@ -451,7 +426,9 @@ trips_data %>%
   labs(x="Day of the week", y="Probability of long trip",
        title=paste0("How likely to get a long trip (>", long_trip, " miles)"))
 
+```
 
+```{r zones_vs_numtrips, fig.cap="This is zones vs number of trips"}
 #taxi_zones@data <- taxi_zones@data %>% select(-c(Daytime, Nighttime))
 # Zones with most trips in daytime and nighttime
 taxi_zones@data <- taxi_zones@data %>%
@@ -483,7 +460,7 @@ Zones with most pickup in nighttime:
 East Harlem South and Morningside Heights have more pickups in daytime than in nighttime.
 Williamsbug North and South have more pickups in nighttime than in daytime.
 
-```{r airport_trips}
+```{r distance_vs_hour, fig.cap="This is "}
 # Trip distance by hour of day
 trips_data %>%
   group_by(Pickup_hour) %>%
@@ -497,7 +474,9 @@ trips_data %>%
   labs(x="Pickup hour", y="Distance in miles",
        title="Mean and median trip distance by hour of day")
 
+```
 
+```{r hour_vs_airport, fig.cap="This is "}
 # Percentage of airport trips per hour
 trips_data %>%
   group_by(Pickup_hour) %>%
@@ -509,8 +488,10 @@ trips_data %>%
   labs(x="Pickup hour", y="Percent of trips to airport",
        title="Percent of trips to airport by hour of day")
 
+```
 
-# Zones with most trips in daytime and nighttime
+```{r zones_vs_airport, fig.cap="This "}
+# Zones with most trips to one of three airports
 taxi_zones@data <- taxi_zones@data %>%
   left_join(
     trips_data %>%
@@ -524,13 +505,19 @@ taxi_zones@data <- taxi_zones@data %>%
 
 qtm(shp=taxi_zones, fill = "Airport_trips", fill.palette = "Blues") +
   qtm(taxi_zones[taxi_zones$zone %in% airport_zones$zone,], fill="red") +
-  tm_legend(main.title = "Ratio of tips to total amount for each pickup taxi zone",
+  tm_legend(main.title = "Frequency of trips to airport at each taxi zone",
             main.title.size = 1)
 ```
 Mean distances were constantly higher than median distance during each hour. This is most likely because the distribution of trip distance is right-skewed, and the mean could be inflated by a few long-distance trips. As such, the median is a fairer representation of the central tendency of all distances.  
 
 the distance of a typical green taxi trip fluctuated around 2 miles during most time of the day. Trips started during 4:00 PM to 6:00 PM tended to be the shortest, and trips started between 4:00 AM and 6:00 AM were the longest. The surge in long-distance trips during the morning is likely driven by trips to the airports or other long-distance rides. As shown above, the sudden increase in percent of taxi rides to airport closely matches the increase in hourly mean and median distance.
-```{r weather}
+
+223                       Steinway         12471
+7                          Astoria         11262
+82                        Elmhurst          8701
+129                Jackson Heights          8475
+
+```{r weather_vs_numtrips, fig.cap="This is "}
 # Weather vs Number of trips
 trips_data %>%
   group_by(Season, Pickup_date) %>%
@@ -545,33 +532,9 @@ trips_data %>%
   labs(x="Value of measurement", y="Frequency of pickups",
        title="Weather condition vs frequency of pickups of every day")
 
+```
 
-# Weather vs Tipping percentage
-trips_data %>%
-  filter(Payment_type == 1) %>%
-  group_by(Season, Pickup_date) %>%
-  summarise(Tipping_percentage = mean(Tip_amount / Total_amount)) %>%
-  ungroup() %>%
-  left_join(weather, by=c("Pickup_date" = "DATE")) %>%
-  gather(AWND:AVG_T, key="Measure", value="Value") %>%
-  ggplot(aes(x=Value, y=Tipping_percentage, color=Season)) +
-  geom_point() +
-  geom_smooth(method=lm) +
-  facet_wrap(Measure ~ ., scales="free_x")
-
-
-# Weather vs Total amount
-trips_data %>%
-  group_by(Season, Pickup_date) %>%
-  summarise(Total_amount = mean(Total_amount)) %>%
-  ungroup() %>%
-  left_join(weather, by=c("Pickup_date" = "DATE")) %>%
-  gather(AWND:AVG_T, key="Measure", value="Value") %>%
-  ggplot(aes(x=Value, y=Total_amount, color=Season)) +
-  geom_point() +
-  geom_smooth(method=lm) +
-  facet_wrap(Measure ~ ., scales="free_x")
-
+```{r weather_vs_distance, fig.cap="This is"}
 # Weather vs Trip distance
 trips_data %>%
   group_by(Season, Pickup_date) %>%
@@ -582,146 +545,15 @@ trips_data %>%
   ggplot(aes(x=Value, y=Trip_distance, color=Season)) +
   geom_point() +
   geom_smooth(method=lm) +
-  facet_wrap(Measure ~ ., scales="free_x")
-
-
-# Weather vs Trip duration
-trips_data %>%
-  group_by(Season, Pickup_date) %>%
-  summarise(Trip_duration = mean(Trip_duration)) %>%
-  ungroup() %>%
-  left_join(weather, by=c("Pickup_date" = "DATE")) %>%
-  gather(AWND:AVG_T, key="Measure", value="Value") %>%
-  ggplot(aes(x=Value, y=Trip_duration, color=Season)) +
-  geom_point() +
-  geom_smooth(method=lm) +
-  facet_wrap(Measure ~ ., scales="free_x")
-```
-
-Days when raining or snowing, number of trips very different from regular days. Location? Under bridge or metro station? Plot on map
-```{r}
-nyc_map <- get_map(location = c(lon = -74.00, lat = 40.71), maptype = "terrain", zoom = 11)
+  facet_wrap(Measure ~ ., scales="free_x") +
+  labs(x="Value of measurement", y="Trip distance in miles",
+       title="Weather condition vs mean trip distance of every day")
 ```
 
 
 
+----------------------------------------------------------------------------------------------------------
 
+# Conclusion  
 
-```{r}
-
-```
-
-
-## Usage of taxi at different days (leaflet?) at different boroughs, taxi pickup and dropoff at different location. taxi best tipping dropoff for every pickup
-
-## Testing 
-```{r}
-library(rgdal)
-lnd <- readOGR(dsn = "data/Creating-maps-in-R-master/data/london_sport.shp")
-lnd$Pop_2001 <- as.numeric(as.character(lnd$Pop_2001))
-```
-
-```{r}
-plot(lnd, col = "lightgrey") # plot the london_sport object
-sel <- lnd$Partic_Per > 25
-head(lnd@data)
-plot(lnd[ sel, ], col = "turquoise", add = TRUE) # add selected zones to map
-```
-
-
-```{r}
-crime_data <- read.csv("data/Creating-maps-in-R-master/data/mps-recordedcrime-borough.csv",
-  stringsAsFactors = FALSE)
-
-head(crime_data$CrimeType) # information about crime type
-
-# Extract "Theft & Handling" crimes and save
-crime_theft <- crime_data[crime_data$CrimeType == "Theft & Handling", ]
-head(crime_theft, 2) # take a look at the result (replace 2 with 10 to see more rows)
-
-# Calculate the sum of the crime count for each district, save result
-crime_ag <- aggregate(CrimeCount ~ Borough, FUN = sum, data = crime_theft)
-# Show the first two rows of the aggregated crime data
-head(crime_ag, 2)
-```
-
-```{r}
-library(dplyr)
-lnd@data <- left_join(lnd@data, crime_ag, by = c('name' = 'Borough'))
-head(lnd@data)
-```
-
-```{r}
-library(tmap) # load tmap package (see Section IV)
-qtm(lnd, "CrimeCount") # plot the basic map
-```
-
-```{r}
-stations <- readOGR(dsn = "data/Creating-maps-in-R-master/data/lnd-stns.shp")
-proj4string(stations)
-proj4string(lnd)
-bbox(stations) # the extent, 'bounding box' of stations
-bbox(lnd) # return the bounding box of the lnd object
-```
-
-```{r}
-stations <- spTransform(stations, CRSobj = CRS(proj4string(lnd)))
-plot(lnd) # plot London 
-points(stations) # overlay the station points
-
-stations <- stations[lnd,]
-plot(stations)
-```
-
-```{r}
-library(tmap)
-vignette("tmap-nutshell")
-
-qtm(shp = lnd, fill = c("Partic_Per", "Pop_2001"), fill.palette = "Blues", ncol = 2)
-```
-
-
-```{r}
-tm_shape(lnd) +
-  tm_fill("Pop_2001", thres.poly = 0) +
-  tm_facets("name", free.coords = TRUE, drop.units = TRUE)
-```
-
-```{r}
-lnd_f <- broom::tidy(lnd)
-head(lnd_f, n = 2) # peak at the fortified data
-lnd$id <- row.names(lnd) # allocate an id variable to the sp data
-head(lnd@data, n = 2) # final check before join (requires shared variable name)
-lnd_f <- left_join(lnd_f, lnd@data) # join the data
-head(lnd_f, 2)
-```
-
-```{r}
-library(ggplot2)
-ggplot(lnd_f, aes(long, lat, group = group, fill = Partic_Per)) +
-  geom_polygon() + coord_equal() +
-  labs(x = "Easting (m)", y = "Northing (m)",
-    fill = "% Sports\nParticipation") +
-  ggtitle("London Sports Participation") +
-  scale_fill_gradient(low = "white", high = "black")
-```
-
-## R Markdown
-
-This is an R Markdown document. Markdown is a simple formatting syntax for authoring HTML, PDF, and MS Word documents. For more details on using R Markdown see <http://rmarkdown.rstudio.com>.
-
-When you click the **Knit** button a document will be generated that includes both content as well as the output of any embedded R code chunks within the document. You can embed an R code chunk like this:
-
-```{r cars}
-summary(cars)
-```
-
-## Including Plots
-
-You can also embed plots, for example:
-
-```{r pressure}
-plot(pressure)
-```
-
-Note that the `echo = FALSE` parameter was added to the code chunk to prevent printing of the R code that generated the plot.
+This is conclusion
