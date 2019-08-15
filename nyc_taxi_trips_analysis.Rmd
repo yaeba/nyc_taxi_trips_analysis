@@ -1,0 +1,650 @@
+---
+title: "New York City Taxi Trips Analysis"
+author: "Xuanken Tay"
+date: "August 6, 2019"
+output: 
+  html_document:
+    toc: true
+    toc_float: true
+    number_sections: true
+    fig_width: 6
+    fig_height: 3.5
+    theme: readable
+    highlights: tango
+    code_folding: hide
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE)
+```
+
+
+
+# Introduction
+
+
+The aim of this study is to gain an initial insight into the open source taxi and weather datasets for the year 2015 in the New York city. In this notebook, we will be dealing with millions of **taxi trips data**, performing initial **exploratory data analysis** on taxi usage and **visualising** the relationships with other attributes - all in a reproducible manner with R.  
+
+A key motivation of choosing to report in HTML document using [knitr](https://yihui.name/knitr/) is [reproducible research](https://en.wikipedia.org/wiki/Reproducibility#Reproducible_research) - in that the results are accompanied by the data and code needed to produce them.  
+
+Source code of this [Rmarkdown](https://rmarkdown.rstudio.com/) can be found in the GitHub [repo](https://github.com/yaeba/nyc_taxi_trips_analysis) if one wishes to reproduce the exact same results of this study. Below are the open source data required for our study.  
+
+
+
+## New York City Taxi & Limousine Commission (TLC) Service Trip Record Data
+
+
+The primary dataset we will be using in this study is the [New York City Taxi and Limousine Service Trip Record Data](https://www1.nyc.gov/site/tlc/about/tlc-trip-record-data.page). The dataset covers trips taken in various different types of licensed taxi and limousine services in the New York City area from 2009 to 2019.  
+
+Briefly, the [yellow](https://en.wikipedia.org/wiki/Taxicabs_of_New_York_City) and [green taxi](https://en.wikipedia.org/wiki/Boro_taxi) trip records include fields capturing pick-up and drop-off dates/times, pick-up and drop-off locations, trip distances, itemized fares, rate types, payment types, and driver-reported passenger counts. Note that the trip data was not created by the TLC, and TLC makes no representations as to the accuracy of these data.  
+
+
+## TLC Taxi Zone Data
+
+We need New York City taxi zone locations information from TLC for our geospatial visualisation.  
+
+- [Taxi Zone Lookup Table](https://s3.amazonaws.com/nyc-tlc/misc/taxi+_zone_lookup.csv): a lookup table that contains TLC taxi zone location IDs, location names and corresponding boroughs for each ID.
+
+- [Taxi Zone Shapefile](https://s3.amazonaws.com/nyc-tlc/misc/taxi_zones.zip): a polygon shapefile containing the boundaries for the TLC taxi zones.
+
+
+## New York City's Central Park Weather Data
+
+
+In order to study how weather conditions affect taxi usage in New York City, we will use the New York City Central Park weather data that comes from [National Climatic Data Center](https://www.ncdc.noaa.gov/) which contains daily weather observation at the central park for year 2015.  
+
+**Limitation** of using this dataset is that we will need to assume that entire New York City will share the exact same weather condition with central park. Moreover, aggreagted daily data may be crude as weather could fluctuate from hour to hour.  
+
+Briefly, columns included in this dataset are average daily wind speed (mile/hr), precipitation, snowfall, snow depth (all in inches), maximum and minimum temperature (both in fahrenheit).  
+
+
+## Load Libraries
+
+We will begin our analysis of taxi trips data by first loading the following R packages:
+
+
+```{r libraries}
+library(tidyverse)
+library(data.table)
+library(ggmap)
+library(tmap)
+library(tmaptools)
+library(rgdal)
+library(lubridate)
+```
+
+- [tidyverse](https://www.tidyverse.org/): to help in general manipulating the dataframes and plotting  
+- [data.table](https://github.com/Rdatatable/data.table): to enable efficient reading and pre-processing of datasets  
+- [ggmap](https://github.com/dkahle/ggmap): extends plotting package `ggplot2` for map  
+- [tmaptools](https://github.com/mtennekes/tmaptools) and [tmap](https://github.com/mtennekes/tmap): tools for reading, processing and plotting spatial data  
+- [rgdal](https://github.com/cran/rgdal): R’s interface to the popular C/C++ spatial data processing library `gdal`  
+- [lubridate](https://github.com/tidyverse/lubridate): allows to manipulate datetime variables  
+  
+
+***
+
+# Data Selection
+
+I have chosen to perform data analysis on the **green taxis** for this study. Green taxis (as opposed to yellow ones) are taxis that are not allowed to pick up passengers inside of the densely populated areas of Manhattan. The choice of analysing green taxi could be justified below:  
+
+1. The smaller green taxi data does not seem to attract much attention of the research community in comparison with the relatively larger yellow taxi. This is evident from the lower number of downloads from the NYC open data website as compared to the yellow ones.
+2. Less well analysed green taxi data may also contains **interesting** human behaviour-related information. This can be seen from the fact that pickups of yellow taxis are usually centered in Manhattan as they are reluctant to look for potential passengers in other areas.  
+3. Green taxi data are **smaller** in size and thus consume less memory on disk and RAM for the analysis. This also makes it easier and faster in terms of downloading and analysing the dataset in R entirely.  
+
+```{r read_data_function}
+# Function to read green taxi data
+read_taxi_data <- function(months, cols) {
+  dfs <- list()
+  for (i in sprintf("%02d", months)) {
+    fname <- paste0("data/green_tripdata_2015-", i, ".csv.gz")
+    dfs[[i]] <- fread(fname, fill=TRUE, select=cols, showProgress=FALSE)
+  }
+  rbindlist(dfs)
+}
+
+```
+
+
+## Period Selection
+
+The entire green taxi dataset is large, covering from year 2013 to 2019. For the purpose of this study, I will look at only the data from **year 2015** as it contains precise pickup and dropoff location information in latitude and longitude - which may be helpful to geospatial analysis of the trips data.  
+
+Furthermore, the green taxi data used for this study will cover [summer and winter](https://www.nyc.com/visitor_guide/weather_facts.75835/) periods of New York in order to take in account of the effect of seasonality. That is, trips from months **June**, **July**, **August** (as summer), **December**, **January** and **February** (as winter) will be read in as two different groups of data. It might be interesting to look at how taxi usage and passengers' behaviour differ between two seasons.  
+
+
+```{r}
+year <- 2015
+summer_months <- c(6, 7, 8)
+winter_months <- c(12, 1, 2)
+
+```
+
+
+## Attribute Selection
+
+We will look at a number of attributes in this study. Firstly, we will examine how **tipping and total amount** paid by passengers vary with the **trip distance** and different **times of days**. Combining with the zone information, we could also look for zones which the passengers tend to tip more on average.  
+
+We will also look at the the **number of green taxi pickups** across different times of days. The result, coupled with **zone information** could better inform taxi drivers to look for potential passengers in the right zones given the day and time.  
+
+In this study, we will identify **trips to airport** with the dropoff location information and examine how it impacts with the number of pickups in early morning. Lastly, daily trip information could be combined with **weather data** to give us an idea of how weather condition affect the taxi usage.  
+
+```{r}
+# columns needed for the analysis
+cols_selected <- c("lpep_pickup_datetime", "Lpep_dropoff_datetime",
+                   "Trip_distance", "Tip_amount", "Total_amount",
+                   "Passenger_count", "Payment_type", 
+                   "Pickup_latitude", "Pickup_longitude",
+                   "Dropoff_latitude", "Dropoff_longitude",
+                   "RateCodeID")
+```
+
+
+***
+
+
+# Data Preparation
+
+The New York City taxi trips data has been processed minimally from the unix shell. The only alteration done on the data with unix was just compressing it to gzipped format. This step was performed to reduce the disk space required to store the data.  
+
+The summer and winter data were then read into R separately. Thanks to `data.table` package, reading, binding and subsequent processing of datasets can be done faster and more efficiently. Note that `fread` supports direct reading of compressed format such as [gz](https://en.wikipedia.org/wiki/Gzip).  
+
+```{r summer_and_winter}
+summer_trips <- read_taxi_data(summer_months, cols_selected)
+winter_trips <- read_taxi_data(winter_months, cols_selected)
+
+cat(paste0("Number of records in summer data: ", dim(summer_trips)[1],
+           "\n",
+            "Number of records in winter data: ", dim(winter_trips)[1])
+)
+```
+
+The trips data were then merged together to give us a dataframe to work on for the analysis. An extra attribute `trip_duration` that captures the **duration** of all trips could also be added to the data by computing the time difference between pickup and dropoff as recorded by taximeter.  
+
+```{r merge_summer_winter}
+# bind summer and winter data together
+trips_data <- rbindlist(list(summer=summer_trips, winter=winter_trips),
+                        idcol="Season")
+
+# to save space
+rm(summer_trips, winter_trips)
+
+# convert to date objects and find difference
+setnames(trips_data, 
+         old=c("lpep_pickup_datetime", "Lpep_dropoff_datetime"),
+         new=c("Pickup_datetime", "Dropoff_datetime"))
+trips_data[, Pickup_datetime := ymd_hms(Pickup_datetime)]
+trips_data[, Dropoff_datetime := ymd_hms(Dropoff_datetime)]
+trips_data[, Trip_duration := difftime(Dropoff_datetime,
+                                       Pickup_datetime,
+                                       units="mins") %>% as.numeric() %>% round(digits=1)]
+
+
+cat(paste0(
+  "Merged dataframe has ", dim(trips_data)[1], 
+  " rows and ", dim(trips_data)[2], " columns")
+)
+```
+
+Taxi zones location and geospatial information were also read in to assist our analysis on the trips data. We also read in the daily weather data for New York City's Central Park and chose only the period relevant to our analysis.  
+
+```{r lookup_shapefile}
+# read in other data
+zones_lookup <- read_csv("data/taxi+_zone_lookup.csv", col_types="iccc")
+taxi_zones <- readOGR(dsn = "data/taxi_zones/taxi_zones.shp", verbose=FALSE)
+taxi_zones$id <- row.names(taxi_zones)
+
+weather <- read_csv("data/central_park_weather.csv", col_types="ccDddddii") %>%
+  filter(month(DATE) %in% c(summer_months, winter_months)) %>%
+  mutate(AVG_T = (TMAX + TMIN) / 2) %>%
+  select(-c("STATION", "NAME", "TMAX", "TMIN"))
+```
+
+Assuming the trips data contains no duplicate records for any single trip, we can then continue with data cleansing and preprocessing. 
+
+## Data Cleansing
+
+It is important to clean the data as removing incorrect information can improve the data quality and in doing so, increases overal productivity. Note that here we cleaned only the taxi trips data as it is ultimately the one to be analysed. Any other data such as the zone information or weather data from external sources to aid in downstream analysis will be assumed to be clean.  
+
+The trips data has been checked and **none** of rows - with chosen attributes contains missing value. It is great because we do not have to worry about losing useful data or doing missing value imputation.
+
+
+```{r missing_val}
+cat(paste(
+  "Number of rows with missing value(s) in trips data:",
+  sum(rowSums(is.na(trips_data)))
+  )
+)
+```
+
+Next the data was checked to remove any abnormal or wrong records. This step is important as it ensures the data is correct, consistent and useable by identifying any errors or inaccurate information in the data. Since manually correcting the data requires huge amount of time and relevant domain knowledge, I decided to simply **remove** trip records that contain any obvious errors.  
+
+Along with some defined "errors", we also want to remove outliers in the data since they are so rare, uninteresting and may not contribute much to the downstream analysis. Briefly, dirtyness in the trips records have been checked and filtered out according to the follwing criteria:  
+
+-   Number of passengers in the vehicle $= 0$ or $> 7$  
+-   Pickup/Dropoff latitude $\notin (39, 42)$ or Pickup/Dropoff longitutde $\notin (-76, -72)$*  
+-   Tip amount $< 0$ or $> 200$ dollars  
+-   Total amount $<= 0$ or $> 300$ dollars  
+-   Trip duration $< 1$ minute or $> 12$ hours  
+-   Trip distance $<= 0$ or $> 100$ miles  
+-   Payment type of neither credit card nor cash  
+
+The above thresholds have been chosen empirically after conducting brief analysis on descriptive statistics on those variables.  
+
+*only trips within New York are of interest, exact location of New York is [40°39′40″N 73°56′38″W](https://en.wikipedia.org/wiki/New_York_City)  
+
+```{r data_cleaning}
+n_before <- dim(trips_data)[1]
+
+# do filtering
+trips_data <- trips_data[
+  !(Passenger_count == 0 | Passenger_count > 7 |
+      Pickup_latitude < 39 | Pickup_latitude > 42 |
+      Pickup_longitude < -76 | Pickup_longitude > -72 |
+      Dropoff_latitude < 39 | Dropoff_latitude > 42 |
+      Dropoff_longitude < -76 | Dropoff_longitude > -72 |
+      Tip_amount < 0 | Tip_amount > 200 |
+      Total_amount <= 0 | Total_amount > 300 |
+      Trip_duration < 1 | Trip_duration > (12 * 60) |
+      Trip_distance <= 0 | Trip_distance > 100 |
+      Payment_type > 2),
+]
+
+n_after <- dim(trips_data)[1]
+
+cat(paste(
+  "Removed", n_before - n_after, "rows from the trips data")
+)
+```
+
+Now the trips data has been cleaned, we are left with higher quality information and can now continue with data preprocessing for the analysis.  
+
+## Data Preprocessing
+
+Taxi zone locations information was first combined into the polygon shapefile that contains the boundaries for each zone. Then, using `over` from the `rgdal` package, all the taxi trips' pickup and dropoff locations were **overlaid** on spatial polygons defining every taxi zone to find pickup and dropoff zones associated with each trip. This information is useful for downstream spatial analysis of attributes with each taxi zone.   
+Note that since GPS location reported may be inaccurate or corrupted, any trips with location not in defined taxi zone of New York City will be removed from the study.  
+
+```{r merge_intersect}
+# merge zone information with taxi service zone in lookup table
+taxi_zones@data <- taxi_zones@data %>%
+  left_join(zones_lookup %>% 
+              select(-LocationID, -Borough) %>%
+              unique(), 
+            by=c('zone' = 'Zone'))
+
+# reproject to commonly used CRS
+taxi_zones <- spTransform(taxi_zones, CRS("+init=epsg:4326"))
+
+# find intersect between trip locations and taxi zones
+trips_data[, 
+  Pickup_location := SpatialPointsDataFrame(coords=trips_data[, c('Pickup_longitude', 'Pickup_latitude')],
+                                            data=trips_data,
+                                            proj4string=CRS(proj4string(taxi_zones))) %>%
+    over(taxi_zones) %>%
+    pull(OBJECTID)]
+
+trips_data[, 
+  Dropoff_location := SpatialPointsDataFrame(coords=trips_data[, c('Dropoff_longitude', 'Dropoff_latitude')],
+                                             data=trips_data,
+                                             proj4string=CRS(proj4string(taxi_zones))) %>%
+    over(taxi_zones) %>%
+    pull(OBJECTID)]
+
+
+# some trips may not fall in known taxi zones
+trips_data <- na.omit(trips_data)
+```
+
+
+For the purpose of **identifying** trips to airport, we will consider airport taxi rides as trips that terminated at the 3 NYC area airports: John F. Kennedy International Airport (JFK), LaGuardia Airport (LGA), and the Newark Liberty International Airport (EWR). Any trip that satifies the following criteria is defined as an aiport trip.
+
+- RateCodeID of 2 (JFK) or 3 (EWR)  
+- Dropoff at JFK, LGA or EWR zone  
+
+Airport trips identification was trivial given that now we have the information of dropoff zone for each trip as a result of intersecting spatial trip points and spatial taxi zone polygons.  
+
+```{r identify_airport_trips}
+# find airport zones from all taxi zones
+airport_zones <- taxi_zones@data %>%
+  filter(service_zone %in% c("Airports", "EWR")) %>%
+  select(OBJECTID, zone)
+
+# identify airport trips
+trips_data[, 
+  Airport_trip := Dropoff_location %in% airport_zones$OBJECTID | RateCodeID %in% c(2, 3)]
+
+
+cat(paste(
+  sum(trips_data$Airport_trip), "trips defined as airport trips")
+)
+```
+
+
+We also need to preprocess datetime attribute to extract the exact hour of day and the day of week. The datetime attribute was replaced by just the date for use in analysis coupled with weather data. Trips were then divided into two categories - **daytime** (from 6:00 to 18:00) and **nighttime** (from 18:00 to 6:00) to allow us study effect of time of day in depth.  
+
+A glimpse of the preprocessed dataframe is shown below:  
+
+```{r preprocess_date}
+trips_data[, Pickup_day := wday(Pickup_datetime, label=TRUE)]
+trips_data[, Pickup_hour := hour(Pickup_datetime)]
+trips_data[, Pickup_datetime := as_date(Pickup_datetime)]
+
+
+# identify day trips and night trips
+trips_data[, Time := ifelse(Pickup_hour >= 6 & Pickup_hour < 18,
+                            "Daytime",
+                            "Nighttime") %>% as.factor()]
+
+# convert to tibble for ggplot
+trips_data <- as_tibble(trips_data) %>%
+  rename(Pickup_date = Pickup_datetime) %>%
+  select(-c(Dropoff_datetime, Passenger_count, 
+            Dropoff_latitude, Dropoff_longitude, RateCodeID))
+
+glimpse(trips_data)
+
+cat(paste0(
+  "Preprocessed dataframe has ", dim(trips_data)[1], 
+  " rows and ", dim(trips_data)[2], " columns")
+)
+```
+
+We have successfully prepared the taxi trips data for analysis. As a **checkpoint**, let's save the processed dataframe into R inbuilt binary file format for loading next time.  
+
+```{r save_load}
+# Uncomment to save or load the preprocessed dataframe
+#saveRDS(trips_data, file="data/trips_data.rds")
+#trips_data <- readRDS("data/trips_data.rds")
+```
+
+
+***
+
+# Findings and Analysis
+
+With the preprocessed taxi trips data, we can now begin our **analysis** and study the relationship between attributes discussed previously and taxi usage. Furthermore, with the New York City taxi zone data we can produce the geospatial visualization of attributes on map in such a way as to guide where further analysis could be performed.  
+
+In this study we will attempt conduct an initial analysis to **answer** the following questions:  
+
+- What affects the passengers' tipping behaviour?  
+- What affects the usage of taxi?  
+- What's so special with the taxi rides to airport?  
+- How does the weather affect the taxi usage in New York City?  
+
+
+## What affects the passengers' tipping behaviour?
+
+To tackle this question, we will first look at how trip distance affects the tip amount, total amount, tipping percentage and trip duration. `Tipping percentage` here is simply the proportion of tip amount to total amount paid by passenger and below are plots showing how these attributes change with trip distance. Note the we smooth the result by binning trip distances so that each bin has roughly equal number of observations.  
+
+```{r distance_vs_vars}
+# Trip distance vs Tipping
+n <- 100
+trips_data %>%
+  filter(Payment_type == 1) %>%
+  mutate(Bin = cut_number(Trip_distance, n)) %>%
+  group_by(Bin) %>%
+  summarise(Trip_distance = mean(Trip_distance),
+            Number = n(),
+            Tip_amount = mean(Tip_amount),
+            Total_amount = mean(Total_amount),
+            Tipping_percentage = mean(Tip_amount / Total_amount),
+            Trip_duration = mean(Trip_duration)) %>%
+  ungroup() %>%
+  gather(Tip_amount:Trip_duration, key="Measure", value="Value") %>%
+  ggplot(aes(x=Trip_distance, y=Value, color=Number)) +
+  geom_point() +
+  facet_wrap(Measure ~ ., scales="free_y") +
+  theme_bw() +
+  labs(title="Relationship of trip distance with other variables")
+
+
+```
+
+This figure shows that while trip distance shows (unsurprising) positive relationship with tip amount, total amount and trip duration, tipping percentage on average goes down as trip distance increases. This means that **despite passengers tend to tip more if they are travelling further, the rate of increase in tip is on average lower than the total amount they pay for the entire trip.**  
+
+We could also show how the tipping percentage fluctuates thoughout the hours of different days.  
+
+```{r timeday_vs_tippercent}
+# Time and day vs Tipping percentage
+trips_data %>%
+  filter(Payment_type == 1) %>%
+  group_by(Season, Pickup_day, Pickup_hour) %>%
+  summarise(Tipping_percentage = mean(Tip_amount / Total_amount)) %>%
+  ggplot(aes(x=Pickup_day, y=Pickup_hour, fill=Tipping_percentage)) +
+  geom_tile() +
+  scale_fill_distiller(palette="Spectral") +
+  scale_y_continuous(breaks=seq(0, 23)) +
+  facet_grid(. ~ Season) +
+  theme_bw() +
+  labs(x="Day of the week", y="Hour of the day",
+       title="Tipping percentage at different times of days")
+
+
+```
+
+
+This plot is interesting as it shows passengers do not routinely give out same percentage of tips from morning to night. In general, we can see the passengers tend to **tip less generously during morning rush hours and evening rush hours**. Note that despite the plot does not show noticeable seasonality effect, we do observe clear distinction between weekdays and weekends which suggests passengers tip differently depending on the day of trip.  
+
+It naturally follows that it would great if we could inform taxi drivers where to look for passengers willing to tip a greater portion of the total amount. Below is a choropeth showing the exact information:  
+
+
+```{r zones_tippercent}
+#taxi_zones@data <- taxi_zones@data %>% select(-c(Tipping_percentage))
+# Zones with pickups with most tipping percentage
+taxi_zones@data <- taxi_zones@data %>%
+  left_join(
+    trips_data %>%
+      group_by(Pickup_location) %>%
+      summarise(Tipping_percentage = mean(Tip_amount / Total_amount)),
+    by=c("OBJECTID"="Pickup_location"))
+
+# qtm(shp=taxi_zones, fill = "Tipping_percentage", fill.palette = "Blues") +
+#   tm_legend(main.title = "Ratio of tips to total amount for each pickup taxi zone",
+#             main.title.size = 1)
+
+map <- get_stamenmap(as.numeric(bbox(taxi_zones)), zoom=10)
+ggmap(map) +
+  geom_polygon(data=fortify(taxi_zones) %>%
+                 left_join(taxi_zones@data),
+               aes(x=long, y=lat, group=group, fill=Tipping_percentage)) +
+  scale_fill_distiller(palette='Spectral') + 
+  labs(x="Longitude", y="Latitude",
+       title="Percent of tips to total amount for each pickup taxi zone")
+```
+
+The result suggests that on average passengers picked up from Hudson Sq and Charleston/Tottenville is likely to pay more fraction of total amount as tips. Note that since we are only looking at trips paid with credit card, we may not have sufficient data and tipping percentage may not be the best way to represent how passengers tip but nevertheless a comparable measure across all trips.  
+
+## What affects usage of taxi?
+
+We define the usage of taxi as the number of taxi pickups in any day or hour. Let's start off by examining the usage of taxi for different days in daytime and nighttime.  
+
+```{r daytrip_vs_nighttrip}
+# Day trip and night trip
+trips_data %>%
+  group_by(Season, Pickup_day, Time) %>%
+  summarise(Num_trips = n()) %>%
+  ungroup() %>%
+  ggplot(aes(x=Pickup_day, y=Num_trips, fill=Time)) +
+  geom_bar(stat="identity", position=position_dodge(), colour="black") +
+  facet_grid(. ~ Season) +
+  theme_bw() +
+  labs(x="Day of the week", y="Number of taxi trips",
+       title="Taxi pickups in daytime and nighttime across days of week")
+
+```
+
+We can immediately tell from the barplots that, in general **weekends have more night trips than day trips** which in turn suggests that taxi drivers should work actively during the day for weekdays and night for weekends in order to maximise number of pickups.  
+
+We can further examine this using the same hour-day plot as from before:  
+
+```{r timeday_vs_numtrips}
+# Time and day
+trips_data %>%
+  group_by(Season, Pickup_day, Pickup_hour) %>%
+  summarise(Num_trips = n()) %>%
+  ungroup() %>%
+  ggplot(aes(x=Pickup_day, y=Pickup_hour, fill=Num_trips)) +
+  geom_tile() +
+  scale_fill_distiller(palette="Spectral") +
+  scale_y_continuous(breaks=seq(0, 23)) +
+  facet_grid(. ~ Season) +
+  theme_bw() +
+  labs(x="Day of the week", y="Hour of the day",
+       title="Taxi pickups at different times of days")
+
+```
+
+From the plot we can confirm that 2:00 to 6:00 have fewest trips on average during weekdays and Friday Saturday nights have a lot more trips than otherwise. Seasonality also shows an effect here in that **winter's Thursday night has a lot more trips than in summer** that could be due to the cold weather and more passengers willing to take taxi home. Again there is also clear distinction between weekdays and weekends (during daytime).  
+
+
+In order to show taxi drivers should really work more during weekends' night, we find the proportion of **long trips** in day trips and night trips across different days as shown in figure below. Note any trip with distance larger than 75% of other trips is defined as a long trip in the analysis.  
+
+```{r daynight_vs_longtrip}
+# How likely to get long trip in daytime and nighttime
+long_trip <- as.numeric(quantile(trips_data$Trip_distance, 0.75))
+trips_data %>%
+  group_by(Pickup_day, Time) %>%
+  summarise(Long_trips = mean(Trip_distance > long_trip)) %>%
+  ungroup() %>%
+  ggplot(aes(x=Pickup_day, y=Long_trips, fill=Time)) +
+  geom_bar(stat="identity", position=position_dodge(), colour="black") +
+  theme_bw() +
+  labs(x="Day of the week", y="Probability of long trip",
+       title=paste0("How likely to get a long trip (>", long_trip, " miles)"))
+
+```
+
+From the plot above, we can say that drivers have slightly higher chance of getting a long trip in nighttime during the weekends. Since longer trips are usually associated with higher tip and total amount, this study suggests that taxi drivers should **work actively in the night during weekends, and otherwise in the day during weekdays**.  
+
+```{r zones_vs_numtrips}
+#taxi_zones@data <- taxi_zones@data %>% select(-c(Daytime, Nighttime))
+# Zones with most trips in daytime and nighttime
+taxi_zones@data <- taxi_zones@data %>%
+  left_join(
+    trips_data %>%
+      group_by(Time, Pickup_location) %>%
+      summarise(Num_trips = n()) %>%
+      spread(key=Time, value=Num_trips),
+    by=c("OBJECTID"="Pickup_location"))
+
+qtm(shp=taxi_zones, fill = c("Daytime", "Nighttime"), fill.palette = "Blues", ncol = 2) +
+  tm_legend(main.title = "Frequency of pickups in daytime and nighttime for each taxi zone",
+            main.title.size = 1)
+
+```
+
+For completeness, above is a figure showing the number of pickups in daytime and nighttime across different taxi zones. Briefly, some taxi zones have high demand for taxi depending on whether it is daytime or nighttime. For example, East Harlem South and Morningside Heights have more pickups in daytime than in nighttime while Williamsbug North and South have more pickups in nighttime than in daytime. Taxi drivers could very well integrate this knowledge in looking for potential passengers in the future.  
+
+
+## What's so special with the taxi rides to airport?  
+
+Recall that we defined airport trips as trips that destinated to one of the 3 airports. Below is a plot showing mean and median trip distance of green taxi by hour of day, followed by proportion of airport trips by hour of day.  
+
+```{r distance_vs_hour}
+# Trip distance by hour of day
+trips_data %>%
+  group_by(Pickup_hour) %>%
+  summarise(Mean = mean(Trip_distance),
+            Median = median(Trip_distance)) %>%
+  ungroup() %>%
+  gather(Mean:Median, key="Trip_distance", value="Value") %>%
+  ggplot(aes(x=Pickup_hour, y=Value)) +
+  geom_line(aes(color=Trip_distance, linetype=Trip_distance), size=1) +
+  theme_bw() +
+  labs(x="Pickup hour", y="Distance in miles",
+       title="Mean and median trip distance by hour of day")
+
+```
+
+```{r hour_vs_airport}
+# Percentage of airport trips per hour
+trips_data %>%
+  group_by(Pickup_hour) %>%
+  summarise(Airport_percent = mean(Airport_trip)) %>%
+  ungroup() %>%
+  ggplot(aes(x=Pickup_hour, y=Airport_percent)) +
+  geom_bar(stat="identity") +
+  theme_bw() +
+  labs(x="Pickup hour", y="Percent of trips to airport",
+       title="Percent of trips to airport by hour of day")
+
+```
+
+We can notice that mean distances were constantly **higher** than median distance during each hour in the first plot. This means that mean could be inflated by a few long-distance trips which in turn suggest that median is a fairer representation of all distances.  
+
+From the second plot, we observe an obvious surge in percentage of taxi trips to airport in the morning from 4:00 to 6:00 which, coincidentally closely **matches** with the sudden increase in hourly mean and median trip distance. Thus, it is likely that the frequent airport rides in the morning could be the explaination behind the surge in long-distance trips betewen 4:00 to 6:00.  
+
+To better inform taxi drivers of where to look for potential passengers heading towards airport, we plot the choropleth showing the frequency of airport trips at each taxi zone. Note that airports are shown in red in the plot below.  
+
+```{r zones_vs_airport}
+# Zones with most trips to one of three airports
+taxi_zones@data <- taxi_zones@data %>%
+  left_join(
+    trips_data %>%
+      filter(Airport_trip) %>%
+      group_by(Pickup_location) %>%
+      summarise(Airport_trips = n()) %>%
+      ungroup(),
+    by=c("OBJECTID"="Pickup_location"))
+
+
+
+qtm(shp=taxi_zones, fill = "Airport_trips", fill.palette = "Blues") +
+  qtm(taxi_zones[taxi_zones$zone %in% airport_zones$zone,], fill="red") +
+  tm_legend(main.title = "Frequency of trips to airport at each taxi zone",
+            main.title.size = 1)
+```
+
+Again, we observe that different taxi zones have different frequency of rides to one of the 3 airports. For example, taxi drivers aim to pickup airport-bound passengers should try **Steinway or Astoria** as those have highest frequency of pickups to airport in total.  
+
+
+## How does the weather affect the taxi usage in New York City?  
+
+We attempt to answer this question using external data from [National Climatic Data Center](https://www.ncdc.noaa.gov/). In the following plots we show the relationship between weather conditions and taxi usage from day to day.  
+
+```{r weather_vs_numtrips}
+# Weather vs Number of trips
+trips_data %>%
+  group_by(Season, Pickup_date) %>%
+  summarise(Num_trips = n()) %>%
+  ungroup() %>%
+  left_join(weather, by=c("Pickup_date" = "DATE")) %>%
+  gather(AWND:AVG_T, key="Measure", value="Value") %>%
+  ggplot(aes(x=Value, y=Num_trips, color=Season)) +
+  geom_point() +
+  geom_smooth(method=lm) +
+  facet_wrap(Measure ~ ., scales="free_x") +
+  labs(x="Value of measurement", y="Frequency of pickups",
+       title="Weather condition vs frequency of pickups of every day")
+
+```
+
+From the plots we could not observe relationship between precipitation and taxi usage, which is surprising as one would think that rainy days have more taxi pickups than usual. Of all the variables, only snowfall seems to have **(weak) negative** relationship with the frequency of pickups, which could be explained by passengers more reluctant to go out during snowy days.  
+
+We could also do the same for the trip distance to examine how changes in weather condition affect distance of taxi trips every day.  
+
+```{r weather_vs_distance}
+# Weather vs Trip distance
+trips_data %>%
+  group_by(Season, Pickup_date) %>%
+  summarise(Trip_distance = mean(Trip_distance)) %>%
+  ungroup() %>%
+  left_join(weather, by=c("Pickup_date" = "DATE")) %>%
+  gather(AWND:AVG_T, key="Measure", value="Value") %>%
+  ggplot(aes(x=Value, y=Trip_distance, color=Season)) +
+  geom_point() +
+  geom_smooth(method=lm) +
+  facet_wrap(Measure ~ ., scales="free_x") +
+  labs(x="Value of measurement", y="Trip distance in miles",
+       title="Weather condition vs mean trip distance of every day")
+```
+
+From the plots above, we see that snowfall and snow depth have **(weak) negative** linear relationship with trip distance. This is unsurprising as it is known that drivers struggle to drive for long distance in snowy condition, especially during heavy snowfall. What's interesting here is average wind speed also shows rather **strong negative** relationship with the distance. Likewise for average temperature, which seems to have **positive correlation** with the trip ditance, may need to investigate further in order to understand the real relationship between them.  
+
+It is important to recall that the **limitations** of the weather data - we are assuming the same weather condition of all taxi zones. More in-depth analysis of the taxi trips with weather data could be made possible if we have weather observations for every taxi zone in a hour to hour resolution.  
+
+***
+
+
+# Conclusion  
+
+We performed an initial analysis on the green taxi data that contains millions of trip records entire in R - in a reproducible manner.  With `ggplot` and `tmap`, we depicted the relationship between attributes and geospatial visualization onto map of New York City taxi zones. We then attempted to answer a few questions for the study, using the figures and plots produced.
