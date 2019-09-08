@@ -1,5 +1,5 @@
 ---
-title: "New York City Taxi Trips Analysis"
+title: "New York City Taxi Trips Analysis (Visualization)"
 author: "Xuanken Tay"
 date: "August 6, 2019"
 output: 
@@ -8,7 +8,7 @@ output:
     toc_float: true
     number_sections: true
     fig_width: 6
-    fig_height: 3.5
+    fig_height: 4.5
     theme: readable
     highlights: tango
     code_folding: hide
