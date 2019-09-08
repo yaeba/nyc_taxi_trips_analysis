@@ -1,0 +1,702 @@
+---
+title: "New York City Taxi Trips Analysis"
+author: "Xuanken Tay"
+date: "September 2, 2019"
+output: 
+  html_document:
+    toc: true
+    toc_float: true
+    number_sections: true
+    fig_width: 6
+    fig_height: 3.5
+    fig_caption: true
+    theme: readable
+    highlights: tango
+    code_folding: hide
+---
+
+
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE)
+```
+
+
+
+# Introduction
+
+The aim of this project is to make a qualitative analysis and gain insights into the open source New York City Taxi and Limousine Service Trip Record Data. In this notebook, we will tackle a reserach problem and perform analysis on millions of **taxi trips data** --- all in a [reproducible](https://en.wikipedia.org/wiki/Reproducibility#Reproducible_research) manner with R, in that the results are accompanied by the data and code needed to produce them.<sup>[1]</sup>  
+
+Source code of this Rmarkdown can be found in the GitHub [repo](https://github.com/yaeba/nyc_taxi_trips_analysis) if one wishes to reproduce the exact same results of this study. Likewise, an initial exploratory analysis of the data can be viewed [here](https://yaeba.github.io/nyc_taxi_trips_analysis/nyc_taxi_trips_analysis_visualization.html).  
+
+
+***
+
+
+# Research Problem
+
+Despite predicting taxi fare is not as rewarding as [predicting airline fares](https://www.business-standard.com/article/international/predicting-airfare-is-a-750-million-business-118100301166_1.html)<sup>[2]</sup>, we may want to start practicing from predicting the former given that now we have an extensive amount of open source data available.   
+
+In this study, we are interested in understanding **how taxis arrive at fares** to be paid by the passengers. To do so, we will first access and report the relation between the taxi fares (*response*) with other attributes (*explanatory*). Following that, we will build statistical models in order to predict taxi fares for rides in the New York City given the input variables. The final model could allow passenger to make use of this knowledge before calling for a taxi service.  
+
+
+## Hypothesis
+
+To approach this research problem, we will first list down a set of **hypotheses**, which in our case are potential factors that could affect the cost of a taxi trip.  
+
+1.  **Trip distance**: Taxi fare is higher for long rides.
+2.  **Trip duration**: Trips caught in traffic jam may have higher fares.
+3.  **Pickup or dropoff location**: Fares may be different depending on the location travelling to/from.
+4.  **Time of travel**: Fare amount may differ during peak and non-peak hours.
+5.  **Day of travel**: On weekends, taxi fares may be higher.
+5.  **Trip to/from airport**: Rides to airport have a [flat fare](https://www.airport-jfk.com/taxi.php)<sup>[3]</sub>.
+6.  **Weather conditions**: Bad weather condition may affect the availability and thus results in higher taxi fare.
+
+
+## Attributes Selection
+
+
+In order to try to infer the result of *hypothesis 1 to 7* above, we will need at least the following attributes to aid in our analysis:  
+
+[`Taxi Fare`, `Pickup and Dropoff Location`, `Pickup and Dropoff Day and Time`, `Trip Distance and Duration`, `Weather Condition` and `Holiday`]
+
+
+We will now begin our analysis of taxi fares by first loading the following R packages:  
+
+
+```{r libraries}
+library(tidyverse)
+library(data.table)
+library(rgdal)
+library(lubridate)
+library(geosphere)
+library(corrplot)
+library(h2o)
+```
+
+- [tidyverse](https://www.tidyverse.org/): to help in general manipulating the dataframes and plotting  
+- [data.table](https://github.com/Rdatatable/data.table): to enable efficient reading and pre-processing of datasets  
+- [rgdal](https://github.com/cran/rgdal): R’s interface to the popular C/C++ spatial data processing library `gdal`  
+- [lubridate](https://github.com/tidyverse/lubridate): allows to manipulate datetime variables  
+- [geosphare](https://www.rdocumentation.org/packages/geosphere): spherical trigonometry for geographic applications  
+- [corrplot](https://cran.r-project.org/web/packages/corrplot/corrplot.pdf): package for graphical display of a correlation matrix  
+- [h2o](http://h2o-release.s3.amazonaws.com/h2o/master/3552/docs-website/h2o-docs/SiteIntro.html): R interface to distributed in-memory machine learning platform
+  
+
+
+***
+
+
+# Data Preparation
+
+## Data Loading
+
+### New York City Taxi & Limousine Commission (TLC) Service Trip Record Data
+
+### TLC Taxi Zone Data
+
+
+```{r}
+# read in taxi zones information
+zones_lookup <- read_csv("data/taxi+_zone_lookup.csv", col_types="iccc")
+taxi_zones <- readOGR(dsn = "data/taxi_zones/taxi_zones.shp", verbose=FALSE)
+taxi_zones$id <- row.names(taxi_zones)
+
+# merge zone information with taxi service zone in lookup table
+taxi_zones@data <- taxi_zones@data %>%
+  left_join(zones_lookup %>% 
+              select(-LocationID, -Borough) %>%
+              unique(), 
+            by=c('zone' = 'Zone')) %>%
+  mutate(zone = as.factor(zone),
+         service_zone = as.factor(service_zone))
+
+# reproject to commonly used CRS
+taxi_zones <- spTransform(taxi_zones, CRS("+init=epsg:4326"))
+```
+
+### Holidays
+
+`
+from datetime import date
+import pandas as pd
+import holidays
+
+ny_holidays = holidays.US(state='NY', years=[2014, 2015, 2016])
+
+df = pd.DataFrame(list(ny_holidays.items()), columns=["Date", "Holiday"])
+
+df.to_csv("ny_holidays.csv", index=False)
+`
+
+
+```{r}
+holidays <- read.csv("data/ny_holidays.csv") %>%
+  mutate(Date = ymd(Date))
+```
+
+### New York City's Central Park Weather Data
+
+```{r}
+weather <- read.csv("data/ny_city_central_park_weather.csv") %>%
+  mutate(DATE = ymd(DATE),
+         TAVG = (TMIN + TMAX) / 2,
+         AWND = ifelse(is.na(AWND), mean(AWND, na.rm=TRUE), AWND),
+         AWND = round(AWND, digits=2)) %>%
+  select(-NAME, -TMAX, -TMIN)
+```
+
+## Data Cleansing
+
+
+In any analytics project 80% of the time and effort is spent on data cleaning, exploratory analysis and deriving new features. In this post, we aim to clean the data, visualize the relationship between variables and also figure out new features that are better predictors of taxi fare.
+
+```{r}
+compute_total_fare <- function(taxi_data) {
+  taxi_data %>%
+    mutate(Total_fare = Total_amount - Tip_amount)
+}
+
+compute_trip_duration <- function(taxi_data) {
+  taxi_data %>%
+    rename(Pickup_datetime = lpep_pickup_datetime,
+           Dropoff_datetime = Lpep_dropoff_datetime) %>%
+    mutate(Pickup_datetime = ymd_hms(Pickup_datetime),
+           Dropoff_datetime = ymd_hms(Dropoff_datetime),
+           Trip_duration = difftime(Dropoff_datetime, Pickup_datetime, units="mins"),
+           Trip_duration = as.numeric(Trip_duration) %>% round(digits=2))
+}
+```
+
+
+```{r}
+clean_taxi_data <- function(taxi_data) {
+  taxi_data %>%
+    # remove rows with missing value(s)
+    drop_na() %>%
+    # data cleansing
+    filter(Passenger_count > 0, Passenger_count <= 6,
+           Pickup_latitude > 39, Pickup_latitude < 42,
+           Pickup_longitude > -76, Pickup_longitude < -72,
+           Dropoff_latitude > 39, Dropoff_latitude < 42,
+           Dropoff_longitude > -76, Dropoff_longitude < -72,
+           Total_fare > 0, Total_fare < 300,
+           Trip_duration > 1, Trip_duration < (12 * 60))
+}
+```
+
+## Data Preprocessing
+
+
+
+```{r}
+spatial_overlap_zones <- function(taxi_data, zones=taxi_zones) {
+  # find intersect between trip locations and taxi zones
+  pickup_zones <- SpatialPointsDataFrame(coords=taxi_data[, c('Pickup_longitude', 'Pickup_latitude')],
+                                         data=taxi_data,
+                                         proj4string=CRS(proj4string(zones))) %>%
+    over(zones) %>%
+    pull(zone)
+  
+  dropoff_zones <- SpatialPointsDataFrame(coords=taxi_data[, c('Dropoff_longitude', 'Dropoff_latitude')],
+                                          data=taxi_data,
+                                          proj4string=CRS(proj4string(zones))) %>%
+    over(zones) %>%
+    pull(zone)
+  
+  taxi_data %>%
+    mutate(Pickup_zone = factor(pickup_zones, levels=levels(zones$zone)),
+           Dropoff_zone = factor(dropoff_zones, levels=levels(zones$zone))) %>%
+    # some trips may not fall in known taxi zones
+    drop_na()
+}
+
+```
+
+
+```{r}
+# find airport zones
+airport_zones <- taxi_zones@data %>%
+  filter(service_zone %in% c("Airports", "EWR")) %>%
+  pull(zone) %>%
+  as.vector()
+
+
+identify_airport_trips <- function(taxi_data, zones=airport_zones) {
+  taxi_data %>%
+    mutate(Airport_trip = Pickup_zone %in% zones |
+                          Pickup_zone %in% zones |
+                          Dropoff_zone %in% zones |
+                          Dropoff_zone %in% zones |
+                          RateCodeID %in% c(2, 3))
+}
+```
+
+
+```{r}
+season <- function(datetime) {
+  ## ref https://www.timeanddate.com/calendar/aboutseasons.html
+  m <- month(datetime)
+  terms <- c("Spring", "Summer", "Autumn", "Winter")
+  s <- factor(character(length(m)), levels=terms)
+  s[m %in% c(3, 4, 5)] <- terms[1]
+  s[m %in% c(6, 7, 8)] <- terms[2]
+  s[m %in% c(9, 10, 11)] <- terms[3]
+  s[m %in% c(12, 1, 2)] <- terms[4]
+  s
+}
+
+
+extract_time_features <- function(taxi_data) {
+  taxi_data %>%
+    mutate(Pickup_month = month(Pickup_datetime, label=TRUE),
+           Pickup_day = wday(Pickup_datetime, label=TRUE),
+           Pickup_hour = hour(Pickup_datetime),
+           Season = season(Pickup_datetime),
+           Weekend = Pickup_day %in% c("Sat", "Sun"),
+           Time = ifelse(Pickup_hour >= 6 & Pickup_hour < 18,
+                         "Daytime",
+                         "Nighttime"),
+           Time = factor(Time, levels=c("Daytime", "Nighttime")))
+}
+
+great_circle_distance <- function(taxi_data) {
+  taxi_data %>%
+    mutate(Great_circle_dist = distHaversine(
+      cbind(Dropoff_longitude, Dropoff_latitude),
+      cbind(Pickup_longitude, Pickup_latitude)) %>%
+        round(digits=2))
+}
+```
+
+```{r}
+join_external_data <- function(taxi_data, holiday_data=holidays, weather_data=weather) {
+  taxi_data %>%
+    # determine if the day is holiday
+    mutate(Pickup_date = as.Date(Pickup_datetime),
+           Holiday = Pickup_date %in% holiday_data$Date) %>%
+    # join with weather data
+    left_join(weather_data, by=c("Pickup_date" = "DATE")) %>%
+    select(-Pickup_date)
+}
+```
+
+
+
+```{r}
+preprocess_taxi_data <- function(taxi_data) {
+  taxi_data %>%
+    spatial_overlap_zones() %>%
+    identify_airport_trips() %>%
+    extract_time_features() %>%
+    great_circle_distance() %>%
+    join_external_data()
+}
+```
+
+
+## Data Processing
+
+```{r}
+read_cols <- c("lpep_pickup_datetime", "Lpep_dropoff_datetime", "RateCodeID",
+               "Pickup_longitude", "Pickup_latitude", 
+               "Dropoff_longitude", "Dropoff_latitude",
+               "Passenger_count", "Trip_distance", "Tip_amount", "Total_amount")
+
+out_cols <- c("Season", "Pickup_month", "Pickup_day", "Weekend", "Pickup_hour", 
+              "Time", "Pickup_zone", "Dropoff_zone", "Passenger_count",
+              "Airport_trip", "Holiday", "AWND", "PRCP", "SNOW", "SNWD", "TAVG",
+              "Trip_distance", "Trip_duration", "Great_circle_dist", "Total_fare")
+
+
+read_one_taxi_data <- function(filename, read_columns=read_cols, out_columns=out_cols) {
+  print(paste("Reading", filename))
+  fread(filename, select=read_columns, fill=TRUE, showProgress=FALSE) %>%
+    as_tibble() %>%
+    compute_total_fare() %>%
+    compute_trip_duration() %>%
+    clean_taxi_data() %>%
+    preprocess_taxi_data() %>%
+    select(out_columns)
+}
+
+read_all_taxi_data <- function(path, pattern) {
+  lapply(list.files(path, pattern, full.names=TRUE), 
+         function(x) read_one_taxi_data(x, read_cols, out_cols)) %>%
+    rbindlist()
+}
+```
+
+
+
+```{r}
+dev <- FALSE
+
+if (dev) {
+  trips_data <- read_all_taxi_data("data", "green_tripdata")
+  saveRDS(trips_data, file="green_trips_data_2014-15.rds")
+}
+```
+
+Processed data has 34095643 rows and 20 columns. (around 3.9~4 in ram).  
+
+
+
+***
+
+
+# Analysis
+
+
+Report target variable via descriptive statistics for a group of selected attributes  
+
+We will do this on a subset of the dataset which contains 1 million records.  
+
+```{r}
+if (dev) {
+  set.seed(100)
+  n <- 1e6
+  subsetted <- sample_n(trips_data, n)
+  saveRDS(subsetted, file="1m_green_trips_data_2014-15.rds")
+} else {
+  subsetted <- readRDS("1m_green_trips_data_2014-15.rds")
+}
+```
+
+## Trip distance and duration
+```{r}
+# trip distance and trip duration vs total fare
+n_bins <- 3
+subsetted <- subsetted %>%
+  mutate(Distance = cut_number(Trip_distance, n_bins),
+         Duration = cut_number(Trip_duration, n_bins)) 
+
+subsetted %>%
+  ggplot(aes(x=Distance, y=Total_fare, fill=Duration)) +
+  geom_boxplot() +
+  ylim(c(0, 50)) +
+  theme_minimal() +
+  labs(title = "Trip distance and duration vs Total fare")
+
+subsetted %>%
+  group_by(Distance, Duration) %>%
+  summarise(Mean_fare = mean(Total_fare)) %>%
+  spread(Duration, Mean_fare) %>%
+  rename("Distance / Duration" = Distance) %>%
+  knitr::kable(digits=2, format="pandoc", caption="Table 1")
+```
+
+
+## Day of week and time
+```{r}
+# day of week and time of day
+subsetted %>%
+  group_by(Pickup_day, Time) %>%
+  summarise(Total_fare = mean(Total_fare)) %>%
+  ggplot(aes(x=Pickup_day, y=Total_fare, color=Time, group=Time)) + 
+  geom_point(aes(pch=Time), size=2) +
+  geom_line(aes(linetype=Time), size=1) +
+  theme_minimal() +
+  labs(title = "Pickup day and time vs (Mean) total fare")
+
+# weekend and daytime/nighttime
+subsetted %>%
+  group_by(Weekend, Time) %>%
+  do(data_frame_(summary(.$Total_fare))) %>%
+  knitr::kable(digits=2, format="pandoc", caption="Table 2")
+
+```
+
+## Effect of trip to/from airport
+```{r}
+# is it trip to/from airport
+subsetted %>%
+  ggplot(aes(x=Total_fare, fill=Airport_trip)) +
+  geom_density(alpha=0.4) +
+  xlim(c(0, 100)) +
+  theme_minimal() +
+  scale_fill_brewer(palette="Dark2") +
+  labs(title = "Distribution of total fare for airport/non-airport trips")
+
+
+subsetted %>%
+  group_by(Airport_trip) %>%
+  do(data_frame_(summary(.$Total_fare))) %>%
+  knitr::kable(digits=2, format="pandoc", caption="Table 3")
+```
+
+
+## Correlation
+
+
+```{r fig.width=7, fig.height=7}
+corr <- subsetted %>%
+  select(-Pickup_hour) %>%
+  select_if(is.numeric) %>%
+  cor()
+
+corrplot(corr, type="lower", method="color", 
+         addCoef.col="black", order="hclust",
+         tl.srt = 45, tl.col="black", 
+         number.cex=1, diag=FALSE, 
+         title="Correlation of numeric variables",
+         mar=c(0, 0, 1, 0))
+
+# save space
+#rm(subsetted)
+```
+
+
+***
+
+
+# Fit model
+
+
+```{r}
+if (dev) {
+  set.seed(100)
+  n <- 3e6
+  train_idx <- sample(nrow(trips_data), n)
+  
+  train <- trips_data[train_idx,] %>%
+    mutate(Pickup_month = factor(Pickup_month, ordered=FALSE),
+           Pickup_day = factor(Pickup_hour, ordered=FALSE))
+  
+  test <- trips_data[-train_idx,] %>%
+    sample_n(n) %>%
+    mutate(Pickup_month = factor(Pickup_month, ordered=FALSE),
+           Pickup_day = factor(Pickup_hour, ordered=FALSE))
+  
+  # save space
+  rm(trips_data)
+}
+```
+
+Handle categorical encoding for us
+
+```{r}
+
+capture.output(localH2O <- h2o.init(nthreads = -1), file="/dev/null")
+
+if (dev) {
+  train.h2o <- as.h2o(train)
+  rm(train)
+  test.h2o <- as.h2o(test)
+  rm(test)
+  
+  response <- "Total_fare"
+  predictors <- setdiff(names(train.h2o), response)
+  
+  regression.model <- h2o.glm(y=response, x=predictors, training_frame=train.h2o, family="gaussian",
+                               validation_frame=test.h2o, standardize=TRUE, 
+                               lambda_search=FALSE, alpha=0, lambda=0)
+  
+  glm_path <- h2o.saveModel(regression.model, path="models/", force=TRUE)
+  
+  print(paste("GLM saved in", glm_path))
+  
+  
+  
+  
+  rforest.model <- h2o.randomForest(y=response, x=predictors, training_frame=train.h2o, 
+                                    validation_frame=test.h2o,
+                                    ntrees=1000, mtries=3, max_depth=4, seed=100)
+  
+  
+  rf_path <- h2o.saveModel(rforest.model, path="models/", force=TRUE)
+  
+  print(paste("RForest saved in", rf_path))
+  
+  
+  
+  
+  gbm.model <- h2o.gbm(y=response, x=predictors, training_frame=train.h2o, 
+                       validation_frame=test.h2o,
+                       ntrees=1000, max_depth=4, learn_rate=0.01, seed=100)
+  
+  
+  gbm_path <- h2o.saveModel(gbm.model, path="models/", force=TRUE)
+  
+  print(paste("GBM saved in", gbm_path))
+  
+} else {
+  # load saved model
+  regression.model <- h2o.loadModel("models/GLM_model_R_1567913957322_10")
+  rforest.model <- h2o.loadModel("models/DRF_model_R_1567913957322_2")
+  gbm.model <- h2o.loadModel("models/GBM_model_R_1567913957322_3")
+}
+```
+
+
+
+
+***
+
+# Results
+
+Interpreting results
+
+## Comparing models
+
+```{r}
+extract_metrics <- function(...) {
+  lapply(..., function(model) {
+    data.frame(
+      list(rmse=h2o.rmse(model, train=TRUE, valid=TRUE),
+           r_squared=h2o.r2(model, train=TRUE, valid=TRUE), 
+           mean_residual_deviance=h2o.mean_residual_deviance(model, train=TRUE, valid=TRUE),
+           training_time=c("train"=model@model$run_time / 1000, "valid"=NA))) %>%
+      rownames_to_column("Dataset") %>%
+      gather(Measure, Value, -Dataset) %>%
+      mutate(Model = model@algorithm) %>%
+      drop_na()
+  }) %>%
+    bind_rows()
+}
+
+
+extract_metrics(c(regression.model, rforest.model, gbm.model)) %>%
+  mutate(Model = factor(Model, levels=c("glm", "drf", "gbm"))) %>%
+  ggplot(aes(x=Model, y=Value, fill=Dataset)) +
+  geom_bar(stat="identity", position=position_dodge(), color="black") +
+  facet_wrap(Measure ~ ., scales="free_y") +
+  scale_fill_brewer(palette="Set2") +
+  labs(title="Performance of models") +
+  theme_bw()
+```
+
+```{r}
+performance_table <- function(...) {
+  extract_metrics(...) %>%
+    filter(Measure == "rmse" | Measure == "r_squared" | Measure == "training_time") %>%
+    unite("Dataset_Measure", c("Dataset", "Measure")) %>%
+    spread(Dataset_Measure, Value) %>%
+    select(Model, Train_RMSE=train_rmse, Validation_RMSE=valid_rmse,
+           Train_R2=train_r_squared, Validation_R2=valid_r_squared,
+           Training_time=train_training_time)
+}
+
+performance_table(c(regression.model, rforest.model, gbm.model)) %>%
+  mutate(Model = toupper(Model),
+         Model = factor(Model, levels=c("GLM", "DRF", "GBM"))) %>%
+  arrange(Model) %>%
+  knitr::kable(digits=3, format="pandoc", caption="Table 4")
+
+```
+
+
+## Variable importances
+Standardized coefficients represent the mean change in the response given a one standard deviation change in the predictor.
+
+```{r}
+## plot bar chart representing the standardized coefficient magnitude
+list("std_coef"=h2o.coef_norm(regression.model)) %>%
+  data.frame() %>%
+  rownames_to_column("variable") %>%
+  mutate(abs = abs(std_coef),
+         sign = factor(ifelse(std_coef > 0, "Positive", "Negative"))) %>%
+  arrange(-abs) %>%
+  head(20) %>%
+  ggplot(aes(x=reorder(variable, abs), y=abs, fill=sign)) +
+  geom_bar(stat="identity", color="black") +
+  coord_flip() +
+  labs(title="Standardized coefficient magnitudes of \nGLM",
+       x="Magnitude",
+       y="Variable") +
+  theme_minimal()
+```
+
+Variable importance is determined by calculating the relative influence of each variable: whether that variable was selected to split on during the tree building process, and how much the squared error (over all trees) improved (decreased) as a result.
+
+```{r}
+# plot graph of the variable importances
+h2o.varimp(gbm.model) %>%
+  as_tibble() %>%
+  select(variable, percentage) %>%
+  arrange(-percentage) %>%
+  head(10) %>%
+  ggplot(aes(x=reorder(variable, percentage), y=percentage, fill=percentage)) +
+  geom_bar(stat="identity", color="black") +
+  coord_flip() +
+  labs(title="Percentage of feature importances of GBM",
+       x="Percentage",
+       y="Variable") +
+  theme_minimal()
+```
+
+
+
+***
+
+# Refine model
+
+```{r}
+if (dev) {
+  elastic_net.model <- h2o.glm(y=response, x=predictors, training_frame=train.h2o, family="gaussian",
+                               validation_frame=test.h2o, standardize=TRUE, 
+                               lambda_search=TRUE)
+  
+  elastic_net_path <- h2o.saveModel(elastic_net.model, path="models/", force=TRUE)
+  
+  print(paste("Elastic net regression saved in", elastic_net_path))
+
+  deepgbm.model <- h2o.gbm(y=response, x=predictors, training_frame=train.h2o, 
+                           validation_frame=test.h2o,
+                           ntrees=2000, max_depth=6, learn_rate=0.05, seed=100)
+  
+  deepgbm_path <- h2o.saveModel(deepgbm.model, path="models/", force=TRUE)
+  
+  print(paste("Deep GBM saved in", deepgbm_path))
+} else {
+  elastic_net.model <- h2o.loadModel("models/GLM_model_R_1567913957322_9")
+  deepgbm.model <- h2o.loadModel("models/GBM_model_R_1567913957322_11")
+}
+```
+
+
+```{r}
+performance_table(c(elastic_net.model, deepgbm.model)) %>%
+  mutate(Model = ifelse(Model == "glm", "Elastic_net", "Deep_GBM"),
+         Model = factor(Model, levels=c("Elastic_net", "Deep_GBM"))) %>%
+  arrange(Model) %>%
+  knitr::kable(digits=3, format="pandoc", caption="Table 5")
+```
+
+## Final model
+
+
+
+## Further considerations
+
+```{r}
+if (dev) {
+  nestedgbm.model <- h2o.gbm(y=response, x=setdiff(predictors, c("Trip_distance", "Trip_duration")),
+                             training_frame=train.h2o, validation_frame=test.h2o,
+                             ntrees=2000, max_depth=6, learn_rate=0.05, seed=100)
+  
+  nestedgbm_path <- h2o.saveModel(a.model, path="models/", force=TRUE)
+  
+  print(paste("A saved in", nestedgbm_path))
+} else {
+  nestedgbm.model <- h2o.loadModel("models/GBM_model_R_1567913957322_12")
+}
+
+performance_table(list(nestedgbm.model)) %>%
+  mutate(Model = "Nested_GBM") %>%
+  knitr::kable(digits=3, format="pandoc", caption="Table 6")
+```
+
+
+
+
+
+```{r}
+h2o.removeAll()
+capture.output(h2o.shutdown(prompt=FALSE), file="/dev/null")
+```
+
+
+***
+
+# Conclusion
