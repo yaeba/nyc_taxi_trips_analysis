@@ -18,7 +18,8 @@ output:
 
 
 ```{r setup, include=FALSE}
-knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE)
+knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE, 
+                      fig.align = "center")
 ```
 
 
@@ -49,20 +50,11 @@ To approach this research problem, we will first list down a set of **hypotheses
 3.  **Pickup or dropoff location**: Fares may be different depending on the location travelling to/from.
 4.  **Time of travel**: Fare amount may differ during peak and non-peak hours.
 5.  **Day of travel**: On weekends, taxi fares may be higher.
-5.  **Trip to/from airport**: Rides to airport have a [flat fare](https://www.airport-jfk.com/taxi.php)<sup>[3]</sub>.
-6.  **Weather conditions**: Bad weather condition may affect the availability and thus results in higher taxi fare.
+6.  **Trip to/from airport**: Rides to airport have a [flat fare](https://www.airport-jfk.com/taxi.php)<sup>[3]</sub>.
+7.  **Weather conditions**: Bad weather condition may affect the availability and thus results in higher taxi fare.
 
 
-## Attributes Selection
-
-
-In order to try to infer the result of *hypothesis 1 to 7* above, we will need at least the following attributes to aid in our analysis:  
-
-[`Taxi Fare`, `Pickup and Dropoff Location`, `Pickup and Dropoff Day and Time`, `Trip Distance and Duration`, `Weather Condition` and `Holiday`]
-
-
-We will now begin our analysis of taxi fares by first loading the following R packages:  
-
+For the purpose of this study, we will use the following R packages:  
 
 ```{r libraries}
 library(tidyverse)
@@ -82,18 +74,31 @@ library(h2o)
 - [corrplot](https://cran.r-project.org/web/packages/corrplot/corrplot.pdf): package for graphical display of a correlation matrix  
 - [h2o](http://h2o-release.s3.amazonaws.com/h2o/master/3552/docs-website/h2o-docs/SiteIntro.html): R interface to distributed in-memory machine learning platform
   
-
+  
 
 ***
 
 
+
 # Data Preparation
+
+In any analytics project, 80% of the time and effort is spent on preparing, cleaning and organizing data for analysis<sup>[4](https://www.forbes.com/sites/gilpress/2016/03/23/data-preparation-most-time-consuming-least-enjoyable-data-science-task-survey-says/#18b4b12f6f63)</sup>. This section describes briefly the data used and the steps taken to process and prepare them for the study.  
 
 ## Data Loading
 
+We will use the following open souce dataset in the analysis.
+
 ### New York City Taxi & Limousine Commission (TLC) Service Trip Record Data
 
+The primary dataset we will be using in this study. The dataset covers trips taken in various different types of licensed taxi and limousine services in the New York City area from 2009 to 2019. Briefly, each taxi trip records pick-up and drop-off datetime and location, trip distance, itemized fare, payment type, and driver-reported passenger count.  
+
+
 ### TLC Taxi Zone Data
+
+New York City taxi zone locations information from TLC that includes:  
+
+-  a lookup table that contains TLC taxi zone location IDs, location names and corresponding boroughs for each ID.  
+-  a polygon shapefile containing the boundaries for the TLC taxi zones.  
 
 
 ```{r}
@@ -117,25 +122,30 @@ taxi_zones <- spTransform(taxi_zones, CRS("+init=epsg:4326"))
 
 ### Holidays
 
-`
-from datetime import date
-import pandas as pd
-import holidays
-
-ny_holidays = holidays.US(state='NY', years=[2014, 2015, 2016])
-
-df = pd.DataFrame(list(ny_holidays.items()), columns=["Date", "Holiday"])
-
-df.to_csv("ny_holidays.csv", index=False)
-`
-
+Dataset primarily created in python to support the taxi fare analysis. It contains list of public holidays for New York at the state level for the year 2014 and 2015.  
 
 ```{r}
+#############################################
+## python code to generate ny_holidays.csv ##
+# from datetime import date
+# import pandas as pd
+# import holidays
+# 
+# ny_holidays = holidays.US(state='NY', years=[2014, 2015])
+# 
+# df = pd.DataFrame(list(ny_holidays.items()), columns=["Date", "Holiday"])
+# 
+# df.to_csv("ny_holidays.csv", index=False)
+############ end of python code #############
+
 holidays <- read.csv("data/ny_holidays.csv") %>%
   mutate(Date = ymd(Date))
 ```
 
 ### New York City's Central Park Weather Data
+
+In order to study how weather conditions affect taxi fare (*hypothesis 7*) in New York City, we will use the New York City Central Park weather data that comes from [National Climatic Data Center](https://www.ncdc.noaa.gov/) which contains daily weather observation at the central park for year 2014 and 2015.  
+One limitation of using this dataset is that we will need to assume that entire New York City will share the exact same weather condition with central park. Moreover, aggreagted daily data may be crude as weather could fluctuate from hour to hour.  
 
 ```{r}
 weather <- read.csv("data/ny_city_central_park_weather.csv") %>%
@@ -146,10 +156,24 @@ weather <- read.csv("data/ny_city_central_park_weather.csv") %>%
   select(-NAME, -TMAX, -TMIN)
 ```
 
-## Data Cleansing
+
+## Data Selection
+
+We will look at green taxi trips for this study. Green taxis (as opposed to yellow ones) are taxis that are not allowed to pick up passengers inside of the densely populated areas of Manhattan. They do not seem to attract much attention of the research community in comparison with the relatively larger yellow taxi but may also contains interesting human behaviour-related information.  
 
 
-In any analytics project 80% of the time and effort is spent on data cleaning, exploratory analysis and deriving new features. In this post, we aim to clean the data, visualize the relationship between variables and also figure out new features that are better predictors of taxi fare.
+### Period Selection
+
+The entire green taxi dataset is large, covering from year 2013 to 2019. For the purpose of this study, we will look at only the data from year 2014 to year 2015 as it contains precise pickup and dropoff location information in latitude and longitude - which may be helpful to in deriving the neighbourhoods and identifying airport trips (as needed for *hypothesis 3 and 6*). Furthermore, spanning the scope of the analysis across whole year allows us take in account of the effect of seasonality.  
+
+### Attributes Selection
+
+With all the data as above, we will look at a number of attributes for the study. Specifically, the following attributes will be used to aid in our analysis:  
+
+[`Total Fare`, `Pickup and Dropoff Location`, `Pickup and Dropoff Day and Time`, `Trip Distance and Duration`, `Weather Condition` and `Holiday`]  
+
+The selection of these attributes are well justified by *hypothesis 1 to 7*, in that we need them to in order to try to infer the result of hypotheses. For the purpose of this study, we will regard `Total Fare` as the amount required to be paid by passenger excluding the tips.  
+
 
 ```{r}
 compute_total_fare <- function(taxi_data) {
@@ -169,6 +193,17 @@ compute_trip_duration <- function(taxi_data) {
 ```
 
 
+## Data Cleansing
+
+It is important to clean the data as removing incorrect information can improve the data quality and in doing so, increases overal productivity. The trips data has been checked and none of rows - with chosen attributes contains missing value. Next the data was checked to remove any abnormal or wrong records. This step is important as it ensures the data is correct, consistent and useable by identifying any errors or inaccurate information in the data. Briefly, bad records or outliers have been filtered out according to the follwing criteria:  
+
+-   Number of passengers in the vehicle $= 0$ or $> 6$: There is a maximum passenger limit imposed on any cabs<sup>[5](https://www.tripsavvy.com/new-york-city-taxis-4026457)</sup>.  
+-   Pickup/Dropoff latitude $\notin (39, 42)$ or Pickup/Dropoff longitutde $\notin (-76, -72)$: Only trips within New York<sup>[6](https://en.wikipedia.org/wiki/New_York_City)</sup> are of interest.  
+-   Total fare $<= 0$ or $> 300$ dollars: Remove negative values and fare above 0.999 quantile (outliers).    
+-   Trip duration $< 1$ minute or $> 12$ hours: Remove trips that are too short or too long (outliers).
+
+
+
 ```{r}
 clean_taxi_data <- function(taxi_data) {
   taxi_data %>%
@@ -185,9 +220,12 @@ clean_taxi_data <- function(taxi_data) {
 }
 ```
 
+
 ## Data Preprocessing
 
+Data preprocessing has been carried out in order to prepare the data for our analysis. Very briefly, the steps involved in transforming the data into a format useful for our study are:  
 
+1. All the taxi trips’ pickup and dropoff locations were overlaid on spatial polygons defining every taxi zone to find pickup and dropoff location associated with each trip. This information is useful for downstream spatial analysis of taxi fare with each taxi zone.  
 
 ```{r}
 spatial_overlap_zones <- function(taxi_data, zones=taxi_zones) {
@@ -210,10 +248,12 @@ spatial_overlap_zones <- function(taxi_data, zones=taxi_zones) {
     # some trips may not fall in known taxi zones
     drop_na()
 }
-
 ```
 
-
+2. Identify airport rides as trips that either  
+  + start or terminate at the 3 NYC area airports: John F. Kennedy International Airport (JFK), LaGuardia Airport (LGA), and the Newark Liberty International Airport (EWR) or  
+  + have `RateCodeID` of 2 (JFK) or 3 (EWR)  
+  
 ```{r}
 # find airport zones
 airport_zones <- taxi_zones@data %>%
@@ -230,8 +270,10 @@ identify_airport_trips <- function(taxi_data, zones=airport_zones) {
                           Dropoff_zone %in% zones |
                           RateCodeID %in% c(2, 3))
 }
+
 ```
 
+3. Extract month, day of week and hour from trips and then determine the season<sup>[6](https://www.timeanddate.com/calendar/aboutseasons.html)</sup>, weekday/weekend and time of day for all trips.  
 
 ```{r}
 season <- function(datetime) {
@@ -260,6 +302,11 @@ extract_time_features <- function(taxi_data) {
            Time = factor(Time, levels=c("Daytime", "Nighttime")))
 }
 
+```
+
+4. Compute orthodromic distance -- shortest distance between two points on the surface of a sphere<sup>[7](https://en.wikipedia.org/wiki/Great-circle_distance)</sup>.  
+
+```{r}
 great_circle_distance <- function(taxi_data) {
   taxi_data %>%
     mutate(Great_circle_dist = distHaversine(
@@ -267,7 +314,10 @@ great_circle_distance <- function(taxi_data) {
       cbind(Pickup_longitude, Pickup_latitude)) %>%
         round(digits=2))
 }
+
 ```
+
+5. Combine with external data in order to gain information on weather conditions and if the day is holiday or not.  
 
 ```{r}
 join_external_data <- function(taxi_data, holiday_data=holidays, weather_data=weather) {
@@ -279,11 +329,7 @@ join_external_data <- function(taxi_data, holiday_data=holidays, weather_data=we
     left_join(weather_data, by=c("Pickup_date" = "DATE")) %>%
     select(-Pickup_date)
 }
-```
 
-
-
-```{r}
 preprocess_taxi_data <- function(taxi_data) {
   taxi_data %>%
     spatial_overlap_zones() %>%
@@ -297,6 +343,7 @@ preprocess_taxi_data <- function(taxi_data) {
 
 ## Data Processing
 
+With all the functions needed for cleaning and pre-processing the data, we can now read all green taxi trips from 2014 to 2015 from local directory, pass through a pipeline of data preparation steps and result in a final dataframe to be used in statistical modelling.  
 ```{r}
 read_cols <- c("lpep_pickup_datetime", "Lpep_dropoff_datetime", "RateCodeID",
                "Pickup_longitude", "Pickup_latitude", 
@@ -325,11 +372,8 @@ read_all_taxi_data <- function(path, pattern) {
          function(x) read_one_taxi_data(x, read_cols, out_cols)) %>%
     rbindlist()
 }
-```
 
 
-
-```{r}
 dev <- FALSE
 
 if (dev) {
@@ -338,8 +382,8 @@ if (dev) {
 }
 ```
 
-Processed data has 34095643 rows and 20 columns. (around 3.9~4 in ram).  
 
+The processed data has 34,095,643 rows and 20 columns and cost around 3.9~4 in RAM in local machine. In the fitting model section, we will turn to `h2o` package for its fast and scalable machine learning application.  
 
 
 ***
@@ -348,9 +392,7 @@ Processed data has 34095643 rows and 20 columns. (around 3.9~4 in ram).
 # Analysis
 
 
-Report target variable via descriptive statistics for a group of selected attributes  
-
-We will do this on a subset of the dataset which contains 1 million records.  
+Before jumping into fitting statistical models, we may want to first analyse and report taxi fares (*response*) via descriptive statistics for a group of *explanatory* variables. In our case, we will do this on a random subsample of prepared dataset which contains 1 million records. A reasonable assumption here is that the records in this subset may very well be a fair representative sample of the entire dataset.  
 
 ```{r}
 if (dev) {
@@ -364,7 +406,10 @@ if (dev) {
 ```
 
 ## Trip distance and duration
-```{r}
+
+In an attempt to infer result from *hypothesis 1*, we can see the effect of trip distance and duration on taxi fare by stratifying the observations into groups of different distance and duration. In Figure 1, we can see trips with long duration are generally associated with higher fare, whereas trip distance seems to have a smaller effect on the fare. Note that distance and duration were discretised into bins such that there are equal number of observations in each bin. A summary of mean total fare for each group is also provided below, as shown in Table 1.
+
+```{r, fig.cap="**Figure 1**: Boxplot of taxi fares, stratified by groups of discretised trip distance and duration. (Cutoff at y=50 for visualization purpose)"}
 # trip distance and trip duration vs total fare
 n_bins <- 3
 subsetted <- subsetted %>%
@@ -383,12 +428,15 @@ subsetted %>%
   summarise(Mean_fare = mean(Total_fare)) %>%
   spread(Duration, Mean_fare) %>%
   rename("Distance / Duration" = Distance) %>%
-  knitr::kable(digits=2, format="pandoc", caption="Table 1")
+  knitr::kable(digits=2, format="pandoc", 
+               caption="Table 1: Mean total fare for each distance and duration group")
 ```
 
 
 ## Day of week and time
-```{r}
+
+To get a sense of how different day and time affect the taxi fare (*hypothesis 4 and 5*), we may want to inspect the mean taxi fare across different days of week for both day and night trips. Note that day trips were defined as trips took place from 6:00 to 18:00 while night trips as trips from 18:00 to 6:00. From Figure 2, we can see that day trips and night trips have very different mean fare during the weekdays. This suggest that time of day may be a factor affecting the taxi fare depending on whether it is weekday or weekend. We can infer that night trips generally have lower taxi fare comparing to day trips during weekdays.  
+```{r, fig.cap="**Figure 2**: Taxi fares of day trips and night trips across different days of week."}
 # day of week and time of day
 subsetted %>%
   group_by(Pickup_day, Time) %>%
@@ -398,17 +446,12 @@ subsetted %>%
   geom_line(aes(linetype=Time), size=1) +
   theme_minimal() +
   labs(title = "Pickup day and time vs (Mean) total fare")
-
-# weekend and daytime/nighttime
-subsetted %>%
-  group_by(Weekend, Time) %>%
-  do(data_frame_(summary(.$Total_fare))) %>%
-  knitr::kable(digits=2, format="pandoc", caption="Table 2")
-
 ```
 
 ## Effect of trip to/from airport
-```{r}
+
+To understand the effect of airport rides on taxi fares (*hypothesis 6*), a plot of distribution of taxi fares for airport and non-airport trips is presented in Figure 3. As expected, taxi fares show very different distribution under both scenarios which could not be otherwise easily detected without grouping. For completeness, a summary of taxi fares is also provided in Table 2 which again shows that the distribution of fares differ between airport and non-airport trips.  
+```{r, fig.cap="**Figure 3**: Density plot showing distribution of airport and non-airport taxi fares. (Cutoff at x=100 for visualization purpose)"}
 # is it trip to/from airport
 subsetted %>%
   ggplot(aes(x=Total_fare, fill=Airport_trip)) +
@@ -422,18 +465,22 @@ subsetted %>%
 subsetted %>%
   group_by(Airport_trip) %>%
   do(data_frame_(summary(.$Total_fare))) %>%
-  knitr::kable(digits=2, format="pandoc", caption="Table 3")
+  knitr::kable(digits=2, format="pandoc", 
+               caption="Table 2: A summary table of distribution of fares for airport vs non-airport rides")
 ```
 
 
 ## Correlation
 
-
-```{r fig.width=7, fig.height=7}
+Understanding the correlation between the explanatory variable may also be useful prior to building statistical models explaining relation of taxi fare with attributes. In this regard, a correlation matrix plot is presented in Figure 4. From the plot, we can see that total fare is weakly or uncorrelated with the different weather condition measures (*hypothesis 7*). This potentially arises due to using a crude and coarse-grained weather dataset. On the other hand, trip distance, duration and great circle distance computed seem to have strong positive correlation with the response. While circle distance is strongly correlated with trip distance, we do expect that either one of them and trip duration to be strong predictors for taxi fare.
+```{r fig.width=7, fig.height=7, fig.cap="**Figure 4**: Correlation plot of numeric explanatory variables. Notice that number of passengers seems irrelevant to any other attributes and could simply be removed in downstream analysis or ignored."}
 corr <- subsetted %>%
   select(-Pickup_hour) %>%
   select_if(is.numeric) %>%
   cor()
+
+# save space
+rm(subsetted)
 
 corrplot(corr, type="lower", method="color", 
          addCoef.col="black", order="hclust",
@@ -442,8 +489,6 @@ corrplot(corr, type="lower", method="color",
          title="Correlation of numeric variables",
          mar=c(0, 0, 1, 0))
 
-# save space
-#rm(subsetted)
 ```
 
 
@@ -452,6 +497,9 @@ corrplot(corr, type="lower", method="color",
 
 # Fit model
 
+We will now build statistical models, each with different underlying assumptions about the data to better explain the relation between taxi fare and other attributes. Due to time and physical limitations of RAM and disk storage, we will only build models and train on 3 millions of the data -- randomly sampled from the entire processed dataset. To do this, as mentioned previously we will use R's interface to `h2o` which handles large scale machine learning algorithm by leveraging computing power of distributed systems and ultilizing parallelized algorithms similar to in-memory mapreduce operations.  
+
+Traning and validation sets each containing 3 millions of records are first created. 
 
 ```{r}
 if (dev) {
@@ -467,19 +515,27 @@ if (dev) {
     sample_n(n) %>%
     mutate(Pickup_month = factor(Pickup_month, ordered=FALSE),
            Pickup_day = factor(Pickup_hour, ordered=FALSE))
-  
-  # save space
-  rm(trips_data)
 }
 ```
 
-Handle categorical encoding for us
+
+In the context of fitting statistical models, we will build 3 models with `Total_fare` as the *response* and the rest attributes as *predictors*:  
+
+- **Multiple Regression (GLM)**: This is essentially linear regression with Gaussian family model with the identity link function. It models the dependency between the *response* and *predictors* as a linear function. It has the advantages of being fast and easy to interprete over other machine learning models.  
+- **Distributed Random Forest (DRF)**: DRF generates a forest of regression trees, each of which is a weak learner built on a subset of observations and attributes. Regression with average prediction over all of the trees to make a final prediction usually results in a lower variance of the model.  
+- **Gradient Boosting Machine (GBM)**: A forward learning ensemble method which builds regression trees on all the features in the dataset in a fully distributed way -- each tree is built in parallel. Briefly, weak regression algorithms are sequentially applied to the incrementally changed data to create a series of decision trees, producing an ensemble of weak prediction models. In general, boosting is a flexible nonlinear regression procedure that helps improve the
+accuracy of trees<sup>[8](https://en.wikipedia.org/wiki/Gradient_boosting)</sup>.  
+
+It should be noted that categorical encoding is carried out while fitting the GLM. The values of all numeric predictors are also standarized to have zero mean and unit variance for ease of comparison downstream.  
 
 ```{r}
 
 capture.output(localH2O <- h2o.init(nthreads = -1), file="/dev/null")
 
 if (dev) {
+  # save space
+  rm(trips_data)
+  
   train.h2o <- as.h2o(train)
   rm(train)
   test.h2o <- as.h2o(test)
@@ -530,16 +586,21 @@ if (dev) {
 
 
 
-
 ***
 
 # Results
 
-Interpreting results
+It is important to interpret the models and understand how they have performed without treating them as black boxes. In this section we will examine how each of them performed on training and validation sets.  
+
 
 ## Comparing models
 
-```{r}
+
+To understand how the models performed, barcharts showing performance metrics of each model on training and validation sets are presented in Figure 5. From the figure, surprisingly DRF performed poorly comparing to other two models. This could arise from the fact that most predictors are not useful in predicting the taxi fare -- thus ensemble of weak learners actually have high bias.   
+
+Nevertheless, we managed to see GLM and GBM performed well in terms of root mean squared error (RMSE) and R squared (R2). In particular, despite of longer training time, GBM achieved an astonishing 2.21 for RMSE and 0.941 for R2 -- which in turn translates on average 2.21$ difference between actual fare and predicted fare amount and 94.1% of the actual taxi fare's variation explained by the model. Table 3 shows summary of performance metrics of each models in tabular form.  
+
+```{r, fig.cap="**Figure 5**: Performance metrics of all 3 models on training and validation sets."}
 extract_metrics <- function(...) {
   lapply(..., function(model) {
     data.frame(
@@ -564,9 +625,7 @@ extract_metrics(c(regression.model, rforest.model, gbm.model)) %>%
   scale_fill_brewer(palette="Set2") +
   labs(title="Performance of models") +
   theme_bw()
-```
 
-```{r}
 performance_table <- function(...) {
   extract_metrics(...) %>%
     filter(Measure == "rmse" | Measure == "r_squared" | Measure == "training_time") %>%
@@ -581,15 +640,19 @@ performance_table(c(regression.model, rforest.model, gbm.model)) %>%
   mutate(Model = toupper(Model),
          Model = factor(Model, levels=c("GLM", "DRF", "GBM"))) %>%
   arrange(Model) %>%
-  knitr::kable(digits=3, format="pandoc", caption="Table 4")
+  knitr::kable(digits=3, format="pandoc", 
+               caption="Table 3: Performance metrics of all 3 models in tabular form.")
 
 ```
 
 
 ## Variable importances
-Standardized coefficients represent the mean change in the response given a one standard deviation change in the predictor.
 
-```{r}
+In an attempt to understand how predictors contributed in the predicting the taxi fare, we will use different measures for each model in order to rank the importance of each predictors.  
+
+In the case of GLM, we will compare the standardized coefficients which represent the mean change in the response given a one standard deviation change in each predictor. In general, a predictor with high magnitude of standardized coefficient indicates that it is important in predicting the response. From Figure 6, we see top 20 predictors with the highest standardized coefficients. As expected, trip distance contributes a lot in predicting the taxi fare, followed by other location and airport attributes (*hypothesis 1, 3 and 6*).  
+
+```{r, fig.cap="**Figure 6**: Barplot showing standardized coefficient magnitudes of top 20 predictors."}
 ## plot bar chart representing the standardized coefficient magnitude
 list("std_coef"=h2o.coef_norm(regression.model)) %>%
   data.frame() %>%
@@ -607,9 +670,9 @@ list("std_coef"=h2o.coef_norm(regression.model)) %>%
   theme_minimal()
 ```
 
-Variable importance is determined by calculating the relative influence of each variable: whether that variable was selected to split on during the tree building process, and how much the squared error (over all trees) improved (decreased) as a result.
+On the other hand, for the tree-based models, we can determine the variable importance by calculating the relative influence of each variable, that is, whether that variable was selected to split on during the tree building process, and how much the RMSE over all trees improved as a result. Specifically, Figure 7 shows the top 10 predictors with highest variable importance in estimating taxi fare for the GBM. Again it suggests that trip distance could potentially be the most important feature in determining the taxi fare, followed by trip duration. Interestingly, other predictors seemed to contribute little to predicting taxi fare.  
 
-```{r}
+```{r, fig.cap="**Figure 7**: Variable importance of each predictor in GBM."}
 # plot graph of the variable importances
 h2o.varimp(gbm.model) %>%
   as_tibble() %>%
@@ -630,6 +693,15 @@ h2o.varimp(gbm.model) %>%
 ***
 
 # Refine model
+
+
+We will now improve GLM and GBM by performing the following steps:  
+
+- Remove insignificant predictors such as weather condition and passenger count.  
+- Fit GLM with elastic net regularization<sup>[9](https://en.wikipedia.org/wiki/Elastic_net_regularization)]</sup> and search for best lambda (regularization parameter).  
+- Fit GBM with more and deeper trees.  
+
+A summary of performance of improved models is shown in Table 4.  
 
 ```{r}
 if (dev) {
@@ -652,18 +724,17 @@ if (dev) {
   elastic_net.model <- h2o.loadModel("models/GLM_model_R_1567913957322_9")
   deepgbm.model <- h2o.loadModel("models/GBM_model_R_1567913957322_11")
 }
-```
 
-
-```{r}
 performance_table(c(elastic_net.model, deepgbm.model)) %>%
   mutate(Model = ifelse(Model == "glm", "Elastic_net", "Deep_GBM"),
          Model = factor(Model, levels=c("Elastic_net", "Deep_GBM"))) %>%
   arrange(Model) %>%
-  knitr::kable(digits=3, format="pandoc", caption="Table 5")
+  knitr::kable(digits=3, format="pandoc", 
+               caption="Table 4: Summary of improved models.")
 ```
 
 ## Final model
+
 
 
 
